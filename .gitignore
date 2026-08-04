@@ -1,0 +1,15 @@
+# Local secrets and machine-specific environment files.
+.env
+*.env
+
+# Python runtime/cache folders created while running the executor or tests.
+__pycache__/
+.pytest_cache/
+
+# Local virtual environments. Each member can create their own; none belong in
+# the shared repo.
+.venv/
+venv/
+
+# macOS metadata files that sometimes appear when the repo is opened on a Mac.
+.DS_Store

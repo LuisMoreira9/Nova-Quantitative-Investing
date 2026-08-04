@@ -1,0 +1,9 @@
+{
+  "paper_trading_only": true,
+  "allowed_symbols": ["AAPL"],
+  "allowed_actions": ["BUY", "SELL"],
+  "max_trade_notional_usd": 5000,
+  "max_order_quantity": 100,
+  "min_order_quantity": 1,
+  "require_whole_shares": true
+}

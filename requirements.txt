@@ -1,0 +1,7 @@
+# Official Alpaca Python SDK used for paper trading, stock market data streams,
+# latest-price checks, and order submission.
+alpaca-py>=0.42.0
+
+# Loads local ".env" files during development so members do not need to export
+# environment variables manually before running python -m core.main_executor.
+python-dotenv>=1.0.0
