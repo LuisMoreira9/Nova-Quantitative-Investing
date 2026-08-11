@@ -20,6 +20,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 try:
     from dotenv import load_dotenv
@@ -95,7 +96,10 @@ def load_strategy_classes(strategies_dir: Path = STRATEGIES_DIR) -> list[type]:
         for _, obj in inspect.getmembers(module, inspect.isclass):
             is_defined_in_module = obj.__module__ == module.__name__
             has_on_bar_contract = callable(getattr(obj, "on_bar", None))
-            if is_defined_in_module and has_on_bar_contract:
+            # ``strategies/base.py`` is a shared abstract contract, not a
+            # runnable strategy.  Only concrete classes can be instantiated.
+            is_concrete = not inspect.isabstract(obj)
+            if is_defined_in_module and has_on_bar_contract and is_concrete:
                 classes.append(obj)
 
     return classes
@@ -164,7 +168,12 @@ def normalize_action(action: str) -> OrderSide:
     raise ExecutorConfigError(f"unsupported order action: {action}")
 
 
-async def route_signal(signal: dict[str, Any], trading_client: TradingClient, risk_gateway: RiskGateway) -> None:
+async def route_signal(
+    signal: dict[str, Any],
+    trading_client: TradingClient,
+    risk_gateway: RiskGateway,
+    strategy_id: str,
+) -> None:
     """Risk-check one signal and submit a paper order only if approved."""
 
     account = trading_client.get_account()
@@ -182,6 +191,9 @@ async def route_signal(signal: dict[str, Any], trading_client: TradingClient, ri
         qty=float(signal["qty"]),
         side=normalize_action(str(signal["action"])),
         time_in_force=TimeInForce.DAY,
+        # Alpaca retains this value with the order.  It makes paper-account
+        # activity attributable to a local strategy in dashboard/app.py.
+        client_order_id=f"nova-{strategy_id[:20]}-{uuid4().hex[:12]}",
     )
     order = trading_client.submit_order(order_data=order_data)
     LOGGER.info("Paper order submitted: %s", getattr(order, "id", order))
@@ -206,7 +218,7 @@ async def handle_bar(bar: Any, strategies: list[Any], trading_client: TradingCli
 
         if signal:
             try:
-                await route_signal(signal, trading_client, risk_gateway)
+                await route_signal(signal, trading_client, risk_gateway, strategy.__class__.__name__)
             except RiskGatewayError:
                 LOGGER.exception("Risk gateway could not evaluate signal: %s", signal)
             except Exception:

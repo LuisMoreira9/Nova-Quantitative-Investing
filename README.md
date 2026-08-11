@@ -20,6 +20,8 @@ What is built now:
 - `config/risk_profile.json`: single source of truth for risk limits.
 - `.env.example`: documents the private environment variables each local runner
   needs.
+- `dashboard/app.py`: a read-only Streamlit view of the connected Alpaca paper
+  account, including account equity, positions, and orders.
 
 What is intentionally not built yet:
 
@@ -96,3 +98,28 @@ To run locally:
 7. Run the local executor: `python -m core.main_executor`.
 
 Never commit `.env` or real API keys.
+
+## Paper-account Dashboard
+
+The dashboard reads the same Alpaca **paper** account used by the executor. It
+does not use the historical price snapshots from the earlier research MVP.
+
+```powershell
+pip install -r requirements.txt
+streamlit run dashboard/app.py
+```
+
+The dashboard uses the `.env` paper keys and forces `paper=True`; it cannot
+submit, cancel, or modify orders. Its equity chart is Alpaca's account-history
+series, while positions and orders are current API results. Orders placed by
+this executor are tagged with their strategy class so the dashboard can group
+new activity by strategy.
+
+## Live Strategy Contract
+
+Strategies follow `strategies.base.BaseLiveStrategy`: they expose a `symbol`
+and implement `on_bar(bar)`. They never query the broker or submit orders.
+Historical snapshot adapters from the research dashboard are deliberately not
+copied here because a snapshot target-weight backtest is not a live Alpaca
+strategy. Each live strategy needs its own real-time data, rebalance schedule,
+and paper-trading validation.

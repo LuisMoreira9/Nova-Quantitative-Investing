@@ -22,8 +22,10 @@ from collections import deque
 from statistics import mean
 from typing import Any
 
+from strategies.base import BaseLiveStrategy
 
-class MeanReversionStrategy:
+
+class MeanReversionStrategy(BaseLiveStrategy):
     """Tiny mean-reversion example using the executor's ``on_bar`` contract.
 
     This is intentionally simple so new members can understand the flow. It is
