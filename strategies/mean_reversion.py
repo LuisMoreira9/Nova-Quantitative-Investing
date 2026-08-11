@@ -5,7 +5,7 @@ Student strategy files should focus only on research logic:
     - update any local indicators/state;
     - return either ``None`` or a plain trade signal.
 
-They should not know about Alpaca API keys, order submission, or risk limits.
+They should not know about IBKR API settings, order submission, or risk limits.
 Those responsibilities belong to ``core/main_executor.py`` and
 ``core/risk_gateway.py``.
 
@@ -53,9 +53,9 @@ class MeanReversionStrategy(BaseLiveStrategy):
         self.qty = qty
 
     def on_bar(self, bar: Any) -> dict[str, Any] | None:
-        """Process one Alpaca bar and maybe return a trade signal.
+        """Process one broker bar and maybe return a trade signal.
 
-        ``bar`` is supplied by Alpaca's stock data stream. In normal use it has
+        ``bar`` is supplied by the executor. In normal use it has
         fields such as ``symbol``, ``open``, ``high``, ``low``, ``close``, and
         ``volume``. This strategy only needs ``bar.close``.
         """

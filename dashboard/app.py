@@ -1,4 +1,4 @@
-"""Run with ``streamlit run dashboard/app.py`` to inspect Nova paper trading."""
+"""Run with ``streamlit run dashboard/app.py`` to inspect the IBKR paper account."""
 
 from __future__ import annotations
 
@@ -14,78 +14,116 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.main_executor import load_local_env
-from dashboard.alpaca_account import PaperAccountDataError, load_paper_account_data
+from dashboard.ibkr_account import load_paper_account_data
 
 
-st.set_page_config(page_title="Nova Paper Trading", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Nova IBKR Paper Trading", page_icon="📈", layout="wide")
 load_local_env()
-st.title("Nova Paper Trading Dashboard")
-st.caption("Read-only view of the connected Alpaca paper account — not a historical snapshot backtest.")
-
-period = st.sidebar.selectbox("Equity-history period", ["1D", "1W", "1M", "3M", "1A", "all"], index=4)
+st.title("Nova IBKR Paper Trading Dashboard")
+st.caption("Read-only view of the local TWS simulated account. It cannot submit, modify, or cancel orders.")
 if st.sidebar.button("Refresh account data"):
-    st.cache_data.clear()
+    st.rerun()
+st.sidebar.caption("Account data auto-refreshes every 60 seconds.")
 
 
-@st.cache_data(ttl=60, show_spinner="Loading Alpaca paper account…")
-def load_data(selected_period: str) -> dict:
-    return load_paper_account_data(selected_period)
+def load_data() -> dict:
+    """Use a fresh TWS snapshot on each scheduled dashboard refresh.
+
+    Caching this response can retain an older DataFrame schema after the
+    adapter gains fields such as ``market``. The dashboard refresh cadence is
+    already one minute, so a cache provides no meaningful protection here.
+    """
+    return load_paper_account_data()
 
 
-try:
-    data = load_data(period)
-except Exception as exc:
-    st.error(f"Could not load Alpaca paper-account data: {exc}")
-    st.stop()
+@st.fragment(run_every=60)
+def render_account() -> None:
+    """Render a fragment that polls TWS once per minute."""
+    try:
+        data = load_data()
+    except Exception as exc:
+        st.error(f"Could not load IBKR paper-account data: {exc}")
+        return
 
-account = data["account"]
-history: pd.DataFrame = data["history"]
-positions: pd.DataFrame = data["positions"]
-orders: pd.DataFrame = data["orders"]
+    account = data["account"]
+    history: pd.DataFrame = data["history"]
+    positions: pd.DataFrame = data["positions"]
+    orders: pd.DataFrame = data["orders"]
+    fx_hedges: pd.DataFrame = data["fx_hedges"]
+    base_currency = data["base_currency"]
+    equity, cash, buying_power = float(account["equity"]), float(account["cash"]), float(account["buying_power"])
+    cards = st.columns(4)
+    cards[0].metric("Paper equity", f"{base_currency} {equity:,.2f}")
+    cards[1].metric("Cash", f"{base_currency} {cash:,.2f}")
+    cards[2].metric("Buying power", f"{base_currency} {buying_power:,.2f}")
+    cards[3].metric("Open positions", len(positions))
+    st.caption(f"Last refreshed: {data['loaded_at'].strftime('%Y-%m-%d %H:%M UTC')}")
 
-equity = float(getattr(account, "equity", 0) or 0)
-cash = float(getattr(account, "cash", 0) or 0)
-buying_power = float(getattr(account, "buying_power", 0) or 0)
-portfolio_change = float(getattr(account, "equity", 0) or 0) - float(getattr(account, "last_equity", 0) or 0)
-cards = st.columns(4)
-cards[0].metric("Paper equity", f"${equity:,.2f}", f"${portfolio_change:,.2f} today")
-cards[1].metric("Cash", f"${cash:,.2f}")
-cards[2].metric("Buying power", f"${buying_power:,.2f}")
-cards[3].metric("Open positions", len(positions))
-st.caption(f"Last refreshed: {data['loaded_at'].strftime('%Y-%m-%d %H:%M UTC')}")
+    overview, position_view, hedge_view, order_view = st.tabs(["Performance", "Positions", "Currency hedge", "Orders & strategy activity"])
+    with overview:
+        if len(history) < 2:
+            st.info("IBKR performance history begins accumulating as the dashboard refreshes.")
+        else:
+            chart = px.line(history, x="timestamp", y="equity", title="Paper account equity", labels={"timestamp": "Time", "equity": f"Equity ({base_currency})"})
+            chart.update_layout(hovermode="x unified")
+            st.plotly_chart(chart, width="stretch", config={"scrollZoom": True, "displaylogo": False})
+    with position_view:
+        if positions.empty:
+            st.info("No open positions in the connected IBKR paper account.")
+        else:
+            display = positions.copy()
+            display["weight"] = display["market_value"] / equity if equity else float("nan")
+            formats = {"quantity": "{:,.4f}", "market_value": "{:,.2f}", "native_market_value": "{:,.2f}", "native_market_value_base": "{:,.2f}", "cost_basis": "{:,.2f}", "average_entry_price": "{:,.2f}", "current_price": "{:,.2f}", "unrealized_pl": "{:,.2f}", "unrealized_plpc": "{:.2%}", "weight": "{:.2%}"}
+            st.caption("Click a position row to open that stock's order history in the Orders tab.")
+            position_selection = st.dataframe(
+                display.style.format({key: value for key, value in formats.items() if key in display}),
+                width="stretch",
+                hide_index=True,
+                key="position_table",
+                on_select="rerun",
+                selection_mode="single-row",
+            )
+            if position_selection.selection.rows:
+                st.session_state["ticker_filter"] = str(display.iloc[position_selection.selection.rows[0]]["symbol"])
+            st.plotly_chart(px.bar(display.sort_values("market_value"), x="symbol", y="market_value", color="side", title="Open-position market value"), width="stretch", config={"displaylogo": False})
+    with hedge_view:
+        st.caption(f"Reporting base: {base_currency}. Currency exposure is calculated as foreign stock value plus the corresponding native cash balance.")
+        st.info("This is a net-exposure report only; it does not assume or place an FX hedge.")
+        if fx_hedges.empty:
+            st.info("No foreign-currency positions are currently held.")
+        else:
+            formats = {"stock_native_exposure": "{:,.2f}", "cash_native_balance": "{:,.2f}", "net_native_exposure": "{:,.2f}", "net_base_exposure": "{:,.2f}"}
+            st.dataframe(fx_hedges.style.format({key: value for key, value in formats.items() if key in fx_hedges}), width="stretch", hide_index=True)
+    with order_view:
+        st.caption("Nova orders carry a `nova-…` order reference.")
+        if orders.empty:
+            st.info("No open orders or session executions returned by TWS.")
+        else:
+            # Prefer friendly market labels, but accept raw broker exchange
+            # values from older callback/session rows as a reliable fallback.
+            market_column = "market" if "market" in orders.columns else "exchange"
+            exchange_options = ["All exchanges"]
+            if market_column in orders.columns:
+                exchange_options.extend(sorted({value for value in orders[market_column].dropna().astype(str) if value.strip()}))
+            selector_left, selector_right = st.columns(2)
+            selected_stock = selector_left.text_input(
+                "Find orders by ticker",
+                key="ticker_filter",
+                placeholder="Type a ticker, e.g. MC, ASML, AAPL",
+                help="Matches the ticker exactly, ignoring upper/lower case. Click a Positions-table row to fill this automatically.",
+            ).strip().upper()
+            selected_exchange = selector_right.selectbox("Filter exchange", exchange_options)
+            filtered_orders = orders.copy()
+            if selected_stock:
+                filtered_orders = filtered_orders[filtered_orders["symbol"].astype(str) == selected_stock]
+            if selected_exchange != "All exchanges" and market_column in filtered_orders.columns:
+                filtered_orders = filtered_orders[filtered_orders[market_column] == selected_exchange]
+            st.caption(f"Showing {len(filtered_orders)} order/execution record(s).")
+            counts = orders.groupby(["strategy", "status"], dropna=False).size().reset_index(name="orders")
+            st.plotly_chart(px.bar(counts, x="strategy", y="orders", color="status", barmode="stack", title="Orders by strategy and status"), width="stretch", config={"displaylogo": False})
+            if "submitted_at" in filtered_orders:
+                filtered_orders = filtered_orders.sort_values("submitted_at", ascending=False, na_position="last")
+            st.dataframe(filtered_orders.style.format({"quantity": "{:,.4f}", "filled_quantity": "{:,.4f}", "filled_avg_price": "{:,.4f}"}), width="stretch", hide_index=True)
 
-overview, position_view, order_view = st.tabs(["Performance", "Positions", "Orders & strategy activity"])
 
-with overview:
-    if history.empty:
-        st.info("Alpaca has not returned portfolio-history points for this period yet.")
-    else:
-        chart = px.line(history, x="timestamp", y="equity", title="Paper account equity", labels={"timestamp": "Time", "equity": "Equity (USD)"})
-        chart.update_layout(hovermode="x unified")
-        st.plotly_chart(chart, width="stretch", config={"scrollZoom": True, "displaylogo": False})
-        returns = history["equity"].pct_change().dropna()
-        if not returns.empty:
-            performance = st.columns(3)
-            performance[0].metric("Period return", f"{history['equity'].iloc[-1] / history['equity'].iloc[0] - 1:.2%}")
-            performance[1].metric("Period high", f"${history['equity'].max():,.2f}")
-            drawdown = history["equity"] / history["equity"].cummax() - 1
-            performance[2].metric("Max drawdown", f"{drawdown.min():.2%}")
-
-with position_view:
-    if positions.empty:
-        st.info("No open positions in the connected paper account.")
-    else:
-        display = positions.copy()
-        display["weight"] = display["market_value"] / equity if equity else float("nan")
-        st.dataframe(display.style.format({"quantity": "{:,.4f}", "market_value": "${:,.2f}", "cost_basis": "${:,.2f}", "average_entry_price": "${:,.2f}", "current_price": "${:,.2f}", "unrealized_pl": "${:,.2f}", "unrealized_plpc": "{:.2%}", "weight": "{:.2%}"}), width="stretch", hide_index=True)
-        exposure = px.bar(display.sort_values("market_value"), x="symbol", y="market_value", color="side", title="Open-position market value")
-        st.plotly_chart(exposure, width="stretch", config={"displaylogo": False})
-
-with order_view:
-    st.caption("Orders with a `nova-…` client order ID are attributed to the strategy class that emitted the signal. Existing Alpaca orders remain untagged.")
-    if orders.empty:
-        st.info("No orders returned by Alpaca for this account.")
-    else:
-        strategy_counts = orders.groupby(["strategy", "status"], dropna=False).size().reset_index(name="orders")
-        st.plotly_chart(px.bar(strategy_counts, x="strategy", y="orders", color="status", barmode="stack", title="Orders by strategy and status"), width="stretch", config={"displaylogo": False})
-        st.dataframe(orders.style.format({"quantity": "{:,.4f}", "filled_quantity": "{:,.4f}", "filled_avg_price": "${:,.4f}"}), width="stretch", hide_index=True)
+render_account()

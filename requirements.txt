@@ -1,12 +1,13 @@
-# Official Alpaca Python SDK used for paper trading, stock market data streams,
-# latest-price checks, and order submission.
-alpaca-py>=0.42.0
+# Official Interactive Brokers Python API for local TWS paper-trading sessions.
+ibapi>=9.81.1
+yfinance>=1.5.2
+lxml>=5.0.0
 
 # Loads local ".env" files during development so members do not need to export
 # environment variables manually before running python -m core.main_executor.
 python-dotenv>=1.0.0
 
-# Local dashboard for the connected Alpaca paper account.
+# Local dashboard for the connected IBKR paper account.
 streamlit>=1.41.0
 pandas>=2.2.0
 plotly>=5.24.0

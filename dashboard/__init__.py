@@ -1,1 +1,1 @@
-"""Streamlit dashboard for Nova's Alpaca paper account."""
+"""Streamlit dashboard for Nova's IBKR simulated account."""

@@ -1,0 +1,7 @@
+{
+  "paper_trading_only": true,
+  "base_currency": "EUR",
+  "hedged_currencies": ["USD"],
+  "rebalance_threshold_base_currency": 250,
+  "max_order_base_currency": 5000
+}

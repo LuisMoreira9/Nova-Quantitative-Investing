@@ -2,6 +2,27 @@
 .env
 *.env
 
+# Locally accumulated IBKR dashboard history.
+data/ibkr_account_history.csv
+data/sp500_pilot_executor.log
+data/sp500_pilot_executor_error.log
+data/sp500_universe_symbols.txt
+data/sp500_yfinance_executor.log
+data/sp500_yfinance_executor_error.log
+data/europe_yfinance_executor.log
+data/europe_yfinance_executor_error.log
+data/stoxx_europe_600_approved_symbols.txt
+data/stoxx_europe_600_contract_validation.csv
+data/stoxx_europe_600_membership.csv
+data/stoxx_europe_600_contract_discovery.csv
+data/stoxx_europe_600_discovery.log
+data/stoxx_europe_600_discovery_error.log
+data/europe_architecture_test_completed.txt
+data/europe_architecture_test_arm.txt
+data/fx_hedge_state.json
+data/fx_hedge_executor.log
+data/fx_hedge_executor_error.log
+
 # Python runtime/cache folders created while running the executor or tests.
 __pycache__/
 .pytest_cache/

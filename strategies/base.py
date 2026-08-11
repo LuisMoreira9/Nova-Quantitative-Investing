@@ -7,10 +7,10 @@ from typing import Any
 
 
 class BaseLiveStrategy(ABC):
-    """A strategy that reacts to live Alpaca bars without submitting orders.
+    """A strategy that reacts to broker bars without submitting orders.
 
     The executor owns broker credentials and order submission.  A strategy only
-    exposes its subscribed ``symbol`` and returns a proposed signal, or
+    exposes its configured Nova instrument ID as ``symbol`` and returns a proposed signal, or
     ``None``, from :meth:`on_bar`.
     """
 

@@ -4,7 +4,7 @@ This module is intentionally separate from ``core/main_executor.py`` because
 the club should be able to review and test risk controls without reading the
 live streaming/execution code. The executor receives trade signals from
 student strategies, then calls ``RiskGateway.evaluate(...)`` before it can
-submit any order to Alpaca.
+    submit any order to Interactive Brokers TWS.
 
 Important boundary:
     Strategies should never submit broker orders directly. They only return a
@@ -21,6 +21,7 @@ Known bug fixed here:
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -38,15 +39,10 @@ class RiskGatewayError(Exception):
 
 
 class PriceProvider(Protocol):
-    """Minimal market-data interface used by the gateway.
+    """External FX conversion interface used by the risk gateway."""
 
-    The real executor passes an Alpaca-backed adapter. Tests can pass a fake
-    object with the same ``get_latest_trade(symbol)`` method, which lets us test
-    risk rules without making network calls or needing Alpaca credentials.
-    """
-
-    def get_latest_trade(self, symbol: str) -> Any:
-        """Return an object/dict containing the latest trade price."""
+    def get_fx_rate_to_base(self, currency: str, base_currency: str) -> float:
+        """Return base-currency value of one unit of ``currency``."""
 
 
 @dataclass(frozen=True)
@@ -80,7 +76,7 @@ class RiskGateway:
         from cheap/local checks to external/account-dependent checks:
         1. validate the signal shape;
         2. enforce JSON config rules;
-        3. fetch the real latest market price;
+        3. validate the fresh externally supplied reference price;
         4. compare trade notional and account buying power.
         """
 
@@ -89,13 +85,13 @@ class RiskGateway:
         normalized = self._normalize_signal(signal)
 
         # Hard stop for the club's current scope: this project is for simulated
-        # Alpaca paper trading only.
+        # IBKR simulated trading only.
         if not self.profile.get("paper_trading_only", True):
             return RiskDecision(False, "risk profile must enforce paper trading only")
 
         # Keep the active trading universe visible in config/risk_profile.json.
         # Stage 1 starts with AAPL only, but the club can expand this list later.
-        if normalized["symbol"] not in set(self.profile["allowed_symbols"]):
+        if normalized["symbol"] not in self._allowed_symbols():
             return RiskDecision(False, f"symbol {normalized['symbol']} is not in allowed_symbols")
 
         # Actions are also config-driven. If the club wants long-only behavior,
@@ -116,16 +112,26 @@ class RiskGateway:
         if self.profile.get("require_whole_shares", True) and qty != qty.to_integral_value():
             return RiskDecision(False, "fractional share orders are disabled by risk_profile.json")
 
-        # Critical risk check: use the current market price from Alpaca data, not
-        # a hardcoded or strategy-provided price.
-        latest_price = self._latest_price(normalized["symbol"])
-        trade_notional = qty * latest_price
-        max_notional = Decimal(str(self.profile["max_trade_notional_usd"]))
+        lot_size = Decimal(str(self.profile["min_order_quantity_by_symbol"].get(normalized["symbol"], min_qty)))
+        if qty % lot_size != 0:
+            return RiskDecision(False, f"quantity {qty} is not a valid {lot_size}-unit board lot for {normalized['symbol']}")
+
+        # IBKR is execution/account infrastructure only. Strategies must carry
+        # a fresh price from the shared external data service; stale intents are
+        # never queued for later execution.
+        latest_price, price_currency = self._reference_quote(normalized)
+        if normalized["action"] == "BUY":
+            latest_price *= Decimal("1") + Decimal(str(self.profile.get("slippage_buffer_pct", "0.03")))
+        native_notional = qty * latest_price
+        conversion_rate = self._fx_rate_to_base(price_currency)
+        trade_notional = native_notional * conversion_rate
+        base_currency = self.profile["base_currency"]
+        max_notional = Decimal(str(self.profile["max_trade_notional_base_currency"]))
 
         if trade_notional > max_notional:
             return RiskDecision(
                 False,
-                f"trade notional {trade_notional:.2f} exceeds max_trade_notional_usd {max_notional:.2f}",
+                f"trade notional {trade_notional:.2f} {base_currency} exceeds limit {max_notional:.2f} {base_currency}",
                 trade_notional=trade_notional,
                 latest_price=latest_price,
             )
@@ -134,10 +140,13 @@ class RiskGateway:
         # handling is intentionally simple in Stage 1; position-aware sell checks
         # can be added in a later risk-profile expansion.
         buying_power = self._account_buying_power(account)
+        account_currency = self._account_currency(account)
+        if account_currency != base_currency:
+            return RiskDecision(False, f"account buying power is in {account_currency}, but risk base is {base_currency}")
         if normalized["action"] == "BUY" and trade_notional > buying_power:
             return RiskDecision(
                 False,
-                f"trade notional {trade_notional:.2f} exceeds buying power {buying_power:.2f}",
+                f"trade notional {trade_notional:.2f} {base_currency} exceeds buying power {buying_power:.2f} {base_currency}",
                 trade_notional=trade_notional,
                 latest_price=latest_price,
             )
@@ -167,9 +176,11 @@ class RiskGateway:
             "paper_trading_only",
             "allowed_symbols",
             "allowed_actions",
-            "max_trade_notional_usd",
+            "base_currency",
+            "max_trade_notional_base_currency",
             "max_order_quantity",
             "min_order_quantity",
+            "min_order_quantity_by_symbol",
             "require_whole_shares",
         }
         missing = sorted(required_keys - set(profile))
@@ -199,32 +210,78 @@ class RiskGateway:
         if qty <= 0:
             raise RiskGatewayError("signal quantity must be positive")
 
-        return {"symbol": symbol, "action": action, "qty": qty}
+        normalized = {"symbol": symbol, "action": action, "qty": qty}
+        if "reference_price" in signal:
+            try:
+                reference_price = Decimal(str(signal["reference_price"]))
+            except (InvalidOperation, ValueError) as exc:
+                raise RiskGatewayError("reference_price must be numeric") from exc
+            if reference_price <= 0:
+                raise RiskGatewayError("reference_price must be positive")
+            normalized["reference_price"] = reference_price
+        elif self.profile.get("require_reference_price", True):
+            raise RiskGatewayError("external reference_price is required; IBKR market data is disabled")
 
-    def _latest_price(self, symbol: str) -> Decimal:
-        """Fetch and validate the current market price for risk math."""
+        if "reference_currency" in signal:
+            normalized["reference_currency"] = str(signal["reference_currency"]).upper().strip()
+        elif "reference_price" in normalized:
+            normalized["reference_currency"] = self.profile["base_currency"]
 
-        latest_trade = self.price_provider.get_latest_trade(symbol)
-        raw_price = getattr(latest_trade, "price", None)
-        if raw_price is None and isinstance(latest_trade, dict):
-            raw_price = latest_trade.get("price")
-        if raw_price is None:
-            raise RiskGatewayError(f"latest trade for {symbol} did not include a price")
+        if "reference_timestamp" in signal:
+            try:
+                timestamp = datetime.fromisoformat(str(signal["reference_timestamp"]).replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise RiskGatewayError("reference_timestamp must be ISO-8601") from exc
+            if timestamp.tzinfo is None:
+                raise RiskGatewayError("reference_timestamp must include a timezone")
+            normalized["reference_timestamp"] = timestamp.astimezone(timezone.utc)
+        elif self.profile.get("require_reference_price", True):
+            raise RiskGatewayError("external reference_timestamp is required; stale signals cannot be queued")
+        return normalized
+
+    def _allowed_symbols(self) -> set[str]:
+        allowed = set(self.profile["allowed_symbols"])
+        configured_paths = [self.profile.get("allowed_symbols_file"), *self.profile.get("allowed_symbols_files", [])]
+        for configured_path in configured_paths:
+            if not configured_path:
+                continue
+            path = self.risk_profile_path.parents[1] / configured_path
+            if path.exists():
+                allowed.update(line.strip().upper() for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+        return allowed
+
+    def _reference_quote(self, signal: dict[str, Any]) -> tuple[Decimal, str]:
+        """Use only fresh shared external data; never request an IBKR quote."""
 
         try:
-            price = Decimal(str(raw_price))
-        except (InvalidOperation, ValueError) as exc:
-            raise RiskGatewayError(f"latest price for {symbol} is not numeric") from exc
+            price = signal["reference_price"]
+            timestamp = signal["reference_timestamp"]
+        except KeyError as exc:
+            raise RiskGatewayError("external reference price and timestamp are required") from exc
+        max_age = float(self.profile.get("max_reference_age_seconds", 300))
+        age = (datetime.now(timezone.utc) - timestamp).total_seconds()
+        if age < -30 or age > max_age:
+            raise RiskGatewayError(f"external reference price is stale ({age:.0f}s; limit {max_age:.0f}s)")
+        return price, signal["reference_currency"]
 
-        if price <= 0:
-            raise RiskGatewayError(f"latest price for {symbol} must be positive")
-        return price
+    def _fx_rate_to_base(self, currency: str) -> Decimal:
+        base_currency = self.profile["base_currency"]
+        if currency == base_currency:
+            return Decimal("1")
+        try:
+            value = self.price_provider.get_fx_rate_to_base(currency, base_currency)
+            rate = Decimal(str(value))
+        except (AttributeError, InvalidOperation, ValueError) as exc:
+            raise RiskGatewayError(f"could not convert {currency} to {base_currency} for risk checks") from exc
+        if rate <= 0:
+            raise RiskGatewayError(f"FX rate {currency}/{base_currency} must be positive")
+        return rate
 
     def _account_buying_power(self, account: Any) -> Decimal:
-        """Extract buying power from Alpaca's account object.
+        """Extract buying power from an IBKR account summary.
 
-        Alpaca account objects can expose ``daytrading_buying_power`` and
-        ``buying_power``. The dict fallback keeps Stage 2 unit tests simple.
+        The dict fallback keeps unit tests simple while the IBKR adapter returns
+        buying power in its account summary mapping.
         """
 
         raw_buying_power = getattr(account, "daytrading_buying_power", None) or getattr(account, "buying_power", None)
@@ -241,3 +298,11 @@ class RiskGateway:
         if buying_power < 0:
             raise RiskGatewayError("account buying power cannot be negative")
         return buying_power
+
+    def _account_currency(self, account: Any) -> str:
+        raw_currency = getattr(account, "currency", None)
+        if raw_currency is None and isinstance(account, dict):
+            raw_currency = account.get("currency")
+        # Fakes used by unit tests may omit a currency; in that case their
+        # buying power is understood to be in the configured base currency.
+        return str(raw_currency or self.profile["base_currency"]).upper()

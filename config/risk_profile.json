@@ -1,9 +1,31 @@
 {
   "paper_trading_only": true,
-  "allowed_symbols": ["AAPL"],
+  "allowed_symbols": ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "ASML", "SAP", "AIR", "MC", "OR", "SAN", "TOYOTA", "TOPIX_ETF"],
   "allowed_actions": ["BUY", "SELL"],
-  "max_trade_notional_usd": 5000,
+  "base_currency": "EUR",
+  "allowed_symbols_file": "data/sp500_universe_symbols.txt",
+  "allowed_symbols_files": ["data/stoxx_europe_600_approved_symbols.txt"],
+  "max_trade_notional_base_currency": 2000,
+  "slippage_buffer_pct": 0.03,
+  "require_reference_price": true,
+  "max_reference_age_seconds": 1200,
   "max_order_quantity": 100,
   "min_order_quantity": 1,
+  "min_order_quantity_by_symbol": {
+    "AAPL": 1,
+    "MSFT": 1,
+    "NVDA": 1,
+    "AMZN": 1,
+    "GOOGL": 1,
+    "META": 1,
+    "ASML": 1,
+    "SAP": 1,
+    "AIR": 1,
+    "MC": 1,
+    "OR": 1,
+    "SAN": 1,
+    "TOYOTA": 100,
+    "TOPIX_ETF": 10
+  },
   "require_whole_shares": true
 }
