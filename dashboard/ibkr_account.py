@@ -12,6 +12,11 @@ import pandas as pd
 from core.ibkr_adapter import IBKRClient
 from core.main_executor import ibkr_connection_settings
 from core.yahoo_price_provider import YahooFxPriceProvider
+from dashboard.strategy_attribution import (
+    append_pnl_snapshot,
+    marked_strategy_pnl,
+    sync_execution_ledger,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -122,7 +127,11 @@ def load_paper_account_data() -> dict[str, Any]:
                         "detail": "Net stock exposure plus native cash balance; no simulated or actual FX order is included.",
                     }
                 )
-        orders = _add_exchange_labels(_frame([*client.get_open_orders(), *client.get_today_executions()]))
+        executions = client.get_today_executions()
+        orders = _add_exchange_labels(_frame([*client.get_open_orders(), *executions]))
+        strategy_ledger = sync_execution_ledger(executions)
+        strategy_sleeves = marked_strategy_pnl(strategy_ledger, base_currency)
+        strategy_history = append_pnl_snapshot(strategy_sleeves)
         history = _append_equity_snapshot(account)
     finally:
         client.close()
@@ -132,6 +141,8 @@ def load_paper_account_data() -> dict[str, Any]:
         "positions": positions,
         "orders": orders,
         "fx_hedges": _frame(hedge_rows),
+        "strategy_sleeves": strategy_sleeves,
+        "strategy_history": strategy_history,
         "currency_cash": currency_cash,
         "base_currency": base_currency,
         "loaded_at": datetime.now(timezone.utc),

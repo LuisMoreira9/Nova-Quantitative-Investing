@@ -4,6 +4,8 @@
 
 # Locally accumulated IBKR dashboard history.
 data/ibkr_account_history.csv
+data/nova_strategy_execution_ledger.csv
+data/nova_strategy_pnl_history.csv
 data/sp500_pilot_executor.log
 data/sp500_pilot_executor_error.log
 data/sp500_universe_symbols.txt

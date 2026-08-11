@@ -102,3 +102,17 @@ approved.
   cannot consume broker market-data lines.
 - `core.fx_hedge_executor`: optional EUR-base paper FX hedge for configured
   foreign-currency stock exposure; runs separately from universe strategies.
+
+## Strategy Performance Attribution
+
+TWS reports only account-level equity. The dashboard therefore treats the TWS
+equity history as the authoritative total portfolio chart. Separately, it
+maintains an ignored local execution ledger from TWS executions whose
+`orderRef` begins with `nova-`. It replays each strategy's fills into its own
+cash-and-position sleeve, marks open positions with external Yahoo prices, and
+displays the resulting **gross strategy P&L** in the EUR reporting base.
+
+The strategy chart excludes manual and untagged IBKR activity, is gross of
+commissions, and begins accumulating when the dashboard first observes the
+execution. It must not be summed with the TWS account-equity value or treated
+as a broker-reported sub-account NAV.

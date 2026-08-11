@@ -652,8 +652,10 @@ class IBKRClient(EWrapper, EClient):
             event.set()
 
     def execDetails(self, reqId: int, contract: Contract, execution: Any) -> None:  # noqa: N802
+        order_ref = str(execution.orderRef or "")
         self._executions.append(
             {
+                "execution_id": str(execution.execId),
                 "submitted_at": execution.time,
                 "symbol": contract.symbol,
                 "exchange": contract.primaryExchange or contract.exchange,
@@ -664,8 +666,8 @@ class IBKRClient(EWrapper, EClient):
                 "filled_quantity": execution.shares,
                 "filled_avg_price": execution.price,
                 "type": "execution",
-                "strategy": "IBKR execution",
-                "client_order_id": execution.orderRef,
+                "strategy": self._strategy_id(order_ref),
+                "client_order_id": order_ref,
             }
         )
 
@@ -712,7 +714,14 @@ class IBKRClient(EWrapper, EClient):
         if not value.startswith("nova-"):
             return "External / untagged"
         parts = value.split("-", 2)
-        return parts[1] if len(parts) == 3 else "Nova"
+        compact = parts[1] if len(parts) == 3 else "Nova"
+        return {
+            "Sp500YfinanceMomentu": "S&P 500 momentum reversal",
+            "EuropeYfinanceMoment": "Europe momentum reversal",
+            "PaperOrderSmokeTest": "Paper order smoke test",
+            "DashboardPositionDem": "Dashboard position demo",
+            "FxHedge": "FX hedge",
+        }.get(compact, compact)
 
     @staticmethod
     def _wait(event: Event, description: str, timeout: float = 15.0) -> None:

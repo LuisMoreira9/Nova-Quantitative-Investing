@@ -50,6 +50,8 @@ def render_account() -> None:
     positions: pd.DataFrame = data["positions"]
     orders: pd.DataFrame = data["orders"]
     fx_hedges: pd.DataFrame = data["fx_hedges"]
+    strategy_sleeves: pd.DataFrame = data["strategy_sleeves"]
+    strategy_history: pd.DataFrame = data["strategy_history"]
     base_currency = data["base_currency"]
     equity, cash, buying_power = float(account["equity"]), float(account["cash"]), float(account["buying_power"])
     cards = st.columns(4)
@@ -67,6 +69,45 @@ def render_account() -> None:
             chart = px.line(history, x="timestamp", y="equity", title="Paper account equity", labels={"timestamp": "Time", "equity": f"Equity ({base_currency})"})
             chart.update_layout(hovermode="x unified")
             st.plotly_chart(chart, width="stretch", config={"scrollZoom": True, "displaylogo": False})
+        st.subheader("Nova strategy-attributed gross P&L")
+        st.caption("Calculated locally from Nova-tagged fills and external Yahoo marks. It excludes manual/untagged IBKR activity and is gross of commissions; the TWS equity chart above remains the authoritative total-account value.")
+        if strategy_sleeves.empty:
+            st.info("No Nova-tagged executions have been observed for strategy attribution yet.")
+        else:
+            strategy_options = ["All Nova strategies", *sorted(strategy_sleeves["strategy"].unique())]
+            selected_strategy = st.selectbox("Strategy performance view", strategy_options)
+            selected_history = strategy_history.copy()
+            if "timestamp" in selected_history:
+                selected_history["timestamp"] = pd.to_datetime(selected_history["timestamp"], utc=True, errors="coerce")
+            if selected_strategy != "All Nova strategies":
+                selected_history = selected_history[selected_history["strategy"] == selected_strategy]
+            if selected_history.empty:
+                st.info("Strategy P&L history begins accumulating on dashboard refreshes.")
+            else:
+                pnl_chart = px.line(
+                    selected_history,
+                    x="timestamp",
+                    y="gross_pnl_base",
+                    color="strategy" if selected_strategy == "All Nova strategies" else None,
+                    title="Strategy-attributed gross P&L",
+                    labels={"timestamp": "Time", "gross_pnl_base": f"Gross P&L ({base_currency})"},
+                )
+                pnl_chart.update_layout(hovermode="x unified")
+                st.plotly_chart(pnl_chart, width="stretch", config={"scrollZoom": True, "displaylogo": False})
+            display_sleeves = strategy_sleeves.copy()
+            if selected_strategy != "All Nova strategies":
+                display_sleeves = display_sleeves[display_sleeves["strategy"] == selected_strategy]
+            st.dataframe(
+                display_sleeves.style.format({
+                    "cash_native": "{:,.2f}",
+                    "position_native": "{:,.2f}",
+                    "gross_pnl_native": "{:,.2f}",
+                    "fx_to_base": "{:,.6f}",
+                    "gross_pnl_base": "{:,.2f}",
+                }),
+                width="stretch",
+                hide_index=True,
+            )
     with position_view:
         if positions.empty:
             st.info("No open positions in the connected IBKR paper account.")
