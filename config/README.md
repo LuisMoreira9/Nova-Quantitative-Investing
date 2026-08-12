@@ -16,6 +16,16 @@ What each setting does:
   these files extend the static list but never bypass the other risk checks.
 - `allowed_actions`: order actions the gateway can approve. Removing `SELL`
   would make the first version long-only.
+- `allow_short_selling`: separate permission for a signal explicitly marked
+  `position_effect: "OPEN"` with action `SELL`. It does not affect normal
+  sales that close long positions. Short executors must still be separately
+  enabled and enforce their own position caps.
+- `max_portfolio_short_positions`, `max_gross_short_notional_base_currency`,
+  `max_daily_short_open_orders`, and
+  `max_daily_short_open_notional_base_currency`: portfolio and daily caps for
+  deliberate short openings. They are checked before a short order is sent.
+- `min_short_buying_power_buffer_base_currency`: minimum remaining account
+  buying power required before a new short can be opened.
 - `base_currency`: portfolio reporting/risk currency. The initial local setup
   uses EUR.
 - `max_trade_notional_base_currency`: maximum EUR-equivalent value for a

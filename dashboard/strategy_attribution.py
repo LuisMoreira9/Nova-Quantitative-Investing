@@ -38,6 +38,8 @@ def strategy_from_order_ref(order_ref: str | None) -> str:
     compact = value.split("-", 2)[1] if value.count("-") >= 2 else "Nova"
     known = {
         "Sp500YfinanceMomentu": "S&P 500 momentum reversal",
+        "Sp500ShortMomentumRe": "S&P 500 short momentum reversal",
+        "ShortExposureRemedia": "Short exposure remediation",
         "EuropeYfinanceMoment": "Europe momentum reversal",
         "PaperOrderSmokeTest": "Paper order smoke test",
         "DashboardPositionDem": "Dashboard position demo",

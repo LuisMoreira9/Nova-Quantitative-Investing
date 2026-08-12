@@ -64,6 +64,22 @@ credentials, or submit/cancel orders themselves.
   not a guaranteed fill price; orders remain IBKR paper market orders.
 - IBKR resolves one unambiguous native listing before an order is submitted.
 - The executor treats an order as successful only after IBKR reports a fill.
+- A `SELL` with `position_effect: "OPEN"` is an intentional short sale. The
+  risk profile must explicitly allow short selling; ordinary long exits do not
+  need that field. Any short strategy must also enforce its own position cap
+  and never adopt a manually entered or another strategy's short.
+- Before any ordinary `SELL` reaches IBKR, the shared executor reads the
+  signed TWS position and rejects the order unless there are enough positive
+  shares to close. A long-only strategy therefore cannot accidentally sell an
+  existing short opened by another strategy.
+- A `BUY` marked `position_effect: "CLOSE"` receives the inverse check: TWS
+  must report enough negative shares to cover, so a duplicate cover cannot
+  turn into a long position.
+- Before an explicit short opening, the short runtime checks the account-wide
+  number and gross value of negative positions, daily tagged short-opening
+  orders/notional, and the configured buying-power buffer. These checks use
+  TWS account/portfolio state and the external signal/FX prices; they do not
+  request IBKR market-data lines.
 
 ## Position Ownership
 
@@ -98,6 +114,17 @@ approved.
   architecture-test threshold is `NOVA_SP500_REVERSAL_THRESHOLD` (default
   `0.00001`, or 0.001%), with up to 25 new orders per scan and a 100-position
   maximum unless the local environment overrides those caps.
+  Its ignored local ownership state is seeded from its own current-session
+  tagged fills and then persisted; it buys/sells only that owned sleeve and
+  ignores manual or other-strategy S&P positions.
+- `core.sp500_short_yfinance_executor`: a separate opt-in, six-name U.S.
+  one-share short/cover paper demonstration. It requires
+  `NOVA_SHORT_SELLING_PAPER_TEST=CONFIRM`, has a three-short cap by default,
+  and persists only the positions it opened so it cannot cover unrelated
+  exposure. If that local state is missing, it rebuilds only from its
+  Nova-tagged execution ledger, never from arbitrary negative account rows.
+  Start it with `python -m core.sp500_short_yfinance_executor` in a
+  separate terminal only after adding that confirmation to the ignored `.env`.
 - `core.main_executor`: legacy IBKR-price runtime; disabled by default so it
   cannot consume broker market-data lines.
 - `core.fx_hedge_executor`: optional EUR-base paper FX hedge for configured

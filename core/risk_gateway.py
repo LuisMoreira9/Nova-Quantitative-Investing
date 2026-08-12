@@ -99,6 +99,14 @@ class RiskGateway:
         if normalized["action"] not in set(self.profile["allowed_actions"]):
             return RiskDecision(False, f"action {normalized['action']} is not in allowed_actions")
 
+        # A SELL may either close a long or open a short. Strategies that
+        # intentionally open short exposure must say so explicitly; this gives
+        # the profile a separate, reviewable short-selling permission without
+        # affecting ordinary long-position exits.
+        if normalized.get("position_effect") == "OPEN" and normalized["action"] == "SELL":
+            if not self.profile.get("allow_short_selling", False):
+                return RiskDecision(False, "short selling is disabled by risk_profile.json")
+
         min_qty = Decimal(str(self.profile["min_order_quantity"]))
         max_qty = Decimal(str(self.profile["max_order_quantity"]))
         qty = normalized["qty"]
@@ -211,6 +219,11 @@ class RiskGateway:
             raise RiskGatewayError("signal quantity must be positive")
 
         normalized = {"symbol": symbol, "action": action, "qty": qty}
+        if "position_effect" in signal:
+            position_effect = str(signal["position_effect"]).upper().strip()
+            if position_effect not in {"OPEN", "CLOSE"}:
+                raise RiskGatewayError("position_effect must be OPEN or CLOSE")
+            normalized["position_effect"] = position_effect
         if "reference_price" in signal:
             try:
                 reference_price = Decimal(str(signal["reference_price"]))

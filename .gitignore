@@ -11,6 +11,10 @@ data/sp500_pilot_executor_error.log
 data/sp500_universe_symbols.txt
 data/sp500_yfinance_executor.log
 data/sp500_yfinance_executor_error.log
+data/sp500_long_paper_state.json
+data/sp500_short_paper_state.json
+data/sp500_short_yfinance_executor.log
+data/sp500_short_yfinance_executor_error.log
 data/europe_yfinance_executor.log
 data/europe_yfinance_executor_error.log
 data/stoxx_europe_600_approved_symbols.txt

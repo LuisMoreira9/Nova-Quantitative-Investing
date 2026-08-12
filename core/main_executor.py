@@ -103,6 +103,48 @@ def delayed_poll_seconds() -> int:
 def route_signal(signal: dict[str, Any], broker: IBKRClient, risk_gateway: RiskGateway, strategy_id: str) -> bool:
     """Risk-check one signal, then submit it to the connected IBKR paper account."""
 
+    action = str(signal.get("action") or "").upper().strip()
+    position_effect = str(signal.get("position_effect") or "").upper().strip()
+    # A normal strategy SELL is a long-position exit, not permission to open a
+    # short.  Inspect the broker's current signed position immediately before
+    # routing it.  Intentional short strategies must declare SELL/OPEN and are
+    # separately controlled by the short-selling risk permission.
+    if action == "SELL" and position_effect != "OPEN":
+        symbol = str(signal.get("symbol") or "").upper().strip()
+        requested_quantity = float(signal.get("qty", 0))
+        net_quantity = sum(
+            float(row.get("quantity", 0))
+            for row in broker.get_portfolio()
+            if str(row.get("symbol") or "").upper() == symbol
+        )
+        if requested_quantity <= 0 or net_quantity < requested_quantity:
+            LOGGER.warning(
+                "Blocked ordinary SELL for %s: requested=%s, current signed position=%s. "
+                "Use explicit SELL/OPEN only in the opt-in short executor.",
+                symbol,
+                requested_quantity,
+                net_quantity,
+            )
+            return False
+    # A BUY marked as CLOSE is a short-cover order. It must not create a new
+    # long if another fill, manual order, or a prior retry has already removed
+    # the short exposure.
+    if action == "BUY" and position_effect == "CLOSE":
+        symbol = str(signal.get("symbol") or "").upper().strip()
+        requested_quantity = float(signal.get("qty", 0))
+        net_quantity = sum(
+            float(row.get("quantity", 0))
+            for row in broker.get_portfolio()
+            if str(row.get("symbol") or "").upper() == symbol
+        )
+        if requested_quantity <= 0 or net_quantity > -requested_quantity:
+            LOGGER.warning(
+                "Blocked BUY/CLOSE for %s: requested=%s, current signed position=%s.",
+                symbol,
+                requested_quantity,
+                net_quantity,
+            )
+            return False
     decision = risk_gateway.evaluate(signal, broker.get_account())
     if not decision.approved:
         LOGGER.warning("Risk rejected %s: %s", signal, decision.reason)
