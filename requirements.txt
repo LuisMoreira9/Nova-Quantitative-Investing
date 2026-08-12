@@ -11,3 +11,7 @@ python-dotenv>=1.0.0
 streamlit>=1.41.0
 pandas>=2.2.0
 plotly>=5.24.0
+
+# Local read-only bridge used by the Svelte website during portfolio-page development.
+fastapi>=0.115.0
+uvicorn>=0.34.0
