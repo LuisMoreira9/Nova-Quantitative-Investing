@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import pandas as pd
@@ -14,6 +15,7 @@ from core.main_executor import ibkr_connection_settings
 from core.yahoo_price_provider import YahooFxPriceProvider
 from dashboard.strategy_attribution import (
     append_pnl_snapshot,
+    execution_history_frame,
     marked_strategy_pnl,
     sync_execution_ledger,
 )
@@ -21,6 +23,9 @@ from dashboard.strategy_attribution import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 HISTORY_PATH = PROJECT_ROOT / "data" / "ibkr_account_history.csv"
+STRATEGY_MARK_CACHE_SECONDS = 300
+_strategy_sleeves_cache: pd.DataFrame | None = None
+_strategy_sleeves_cached_at = 0.0
 
 EXCHANGE_LABELS = {
     "AEB": "Euronext Amsterdam",
@@ -32,6 +37,7 @@ EXCHANGE_LABELS = {
     "NYSE": "NYSE",
     "ARCA": "NYSE Arca",
     "SMART": "IBKR SMART",
+    "UNAVAILABLE": "Historical venue unavailable",
 }
 
 
@@ -72,6 +78,25 @@ def _append_equity_snapshot(account: dict[str, str]) -> pd.DataFrame:
     history.to_csv(HISTORY_PATH, index=False)
     history["timestamp"] = pd.to_datetime(history["timestamp"], utc=True, errors="coerce")
     return history
+
+
+def _strategy_sleeves_for_dashboard(ledger: pd.DataFrame, base_currency: str) -> tuple[pd.DataFrame, bool]:
+    """Limit Yahoo marking work without delaying account/order snapshots.
+
+    The broker data in the dashboard must be current on every refresh.  The
+    per-strategy gross-P&L view is analytical and requires external Yahoo
+    marks for every open Nova sleeve, which can take tens of seconds for a
+    large paper portfolio.  Reuse its most recent marks for a short period so
+    the read-only TWS account, positions, and execution table remain prompt.
+    """
+
+    global _strategy_sleeves_cache, _strategy_sleeves_cached_at
+    if _strategy_sleeves_cache is not None and monotonic() - _strategy_sleeves_cached_at < STRATEGY_MARK_CACHE_SECONDS:
+        return _strategy_sleeves_cache.copy(), False
+    sleeves = marked_strategy_pnl(ledger, base_currency)
+    _strategy_sleeves_cache = sleeves.copy()
+    _strategy_sleeves_cached_at = monotonic()
+    return sleeves, True
 
 
 def load_paper_account_data() -> dict[str, Any]:
@@ -127,11 +152,18 @@ def load_paper_account_data() -> dict[str, Any]:
                         "detail": "Net stock exposure plus native cash balance; no simulated or actual FX order is included.",
                     }
                 )
+        open_order_rows = client.get_open_orders()
         executions = client.get_today_executions()
-        orders = _add_exchange_labels(_frame([*client.get_open_orders(), *executions]))
+        orders = _add_exchange_labels(_frame([*open_order_rows, *executions]))
         strategy_ledger = sync_execution_ledger(executions)
-        strategy_sleeves = marked_strategy_pnl(strategy_ledger, base_currency)
-        strategy_history = append_pnl_snapshot(strategy_sleeves)
+        order_history = execution_history_frame(strategy_ledger)
+        open_orders = _add_exchange_labels(_frame(open_order_rows))
+        if not open_orders.empty:
+            open_orders = open_orders.copy()
+            open_orders["source"] = "TWS open order"
+            order_history = pd.concat([order_history, open_orders], ignore_index=True, sort=False)
+        strategy_sleeves, strategy_marks_refreshed = _strategy_sleeves_for_dashboard(strategy_ledger, base_currency)
+        strategy_history = append_pnl_snapshot(strategy_sleeves, append=strategy_marks_refreshed)
         history = _append_equity_snapshot(account)
     finally:
         client.close()
@@ -140,8 +172,10 @@ def load_paper_account_data() -> dict[str, Any]:
         "history": history,
         "positions": positions,
         "orders": orders,
+        "order_history": _add_exchange_labels(order_history),
         "fx_hedges": _frame(hedge_rows),
         "strategy_sleeves": strategy_sleeves,
+        "strategy_marks_refreshed": strategy_marks_refreshed,
         "strategy_history": strategy_history,
         "currency_cash": currency_cash,
         "base_currency": base_currency,

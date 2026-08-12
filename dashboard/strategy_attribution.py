@@ -25,7 +25,7 @@ LEDGER_PATH = ROOT / "data" / "nova_strategy_execution_ledger.csv"
 HISTORY_PATH = ROOT / "data" / "nova_strategy_pnl_history.csv"
 LEDGER_COLUMNS = [
     "execution_id", "timestamp", "strategy", "order_ref", "symbol",
-    "currency", "side", "quantity", "price",
+    "exchange", "currency", "side", "quantity", "price",
 ]
 
 
@@ -54,6 +54,19 @@ def _execution_id(row: dict[str, Any]) -> str:
     return sha256(immutable.encode("utf-8")).hexdigest()
 
 
+def _parse_execution_timestamp(value: object) -> pd.Timestamp:
+    """Parse both persisted ISO timestamps and IBKR's ``YYYYMMDD  HH:MM:SS``."""
+
+    text = str(value or "").strip()
+    if not text:
+        return pd.NaT
+    compact = " ".join(text.split())
+    try:
+        return pd.Timestamp(datetime.strptime(compact, "%Y%m%d %H:%M:%S"), tz="UTC")
+    except ValueError:
+        return pd.to_datetime(text, format="mixed", utc=True, errors="coerce")
+
+
 def sync_execution_ledger(executions: list[dict[str, Any]]) -> pd.DataFrame:
     """Upsert Nova executions observed from TWS into an append-only local ledger."""
 
@@ -73,6 +86,10 @@ def sync_execution_ledger(executions: list[dict[str, Any]]) -> pd.DataFrame:
                 "strategy": strategy_from_order_ref(order_ref),
                 "order_ref": order_ref,
                 "symbol": str(row.get("symbol") or "").upper(),
+                # This is the venue reported by TWS for the execution.  It is
+                # distinct from the local-ledger source and must stay with the
+                # fill so historical dashboard filters remain meaningful.
+                "exchange": str(row.get("exchange") or "").upper(),
                 "currency": str(row.get("currency") or "").upper(),
                 "side": str(row.get("side") or "").lower(),
                 "quantity": float(quantity),
@@ -88,12 +105,44 @@ def sync_execution_ledger(executions: list[dict[str, Any]]) -> pd.DataFrame:
     if combined.empty:
         return pd.DataFrame(columns=LEDGER_COLUMNS)
     combined = combined.reindex(columns=LEDGER_COLUMNS)
-    combined["timestamp"] = pd.to_datetime(combined["timestamp"], utc=True, errors="coerce")
+    combined["timestamp"] = combined["timestamp"].map(_parse_execution_timestamp)
     combined = combined.dropna(subset=["timestamp", "symbol", "currency", "quantity", "price"])
     combined = combined.sort_values(["timestamp", "execution_id"]).reset_index(drop=True)
     LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
     combined.assign(timestamp=combined["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%S%z")).to_csv(LEDGER_PATH, index=False)
     return combined
+
+
+def execution_history_frame(ledger: pd.DataFrame) -> pd.DataFrame:
+    """Return locally recorded Nova fills in the dashboard's order schema.
+
+    IBKR's execution query is scoped to the active session/day. This durable
+    ledger lets the dashboard display prior *observed* Nova fills by date; it
+    does not claim to be a complete broker statement import.
+    """
+
+    columns = [
+        "execution_id", "submitted_at", "symbol", "exchange", "currency",
+        "side", "status", "quantity", "filled_quantity", "filled_avg_price",
+        "type", "strategy", "client_order_id", "source",
+    ]
+    if ledger.empty:
+        return pd.DataFrame(columns=columns)
+    history = ledger.rename(columns={
+        "timestamp": "submitted_at",
+        "order_ref": "client_order_id",
+        "price": "filled_avg_price",
+    }).copy()
+    # Older ledger rows predate venue persistence.  Keep those explicitly
+    # unavailable rather than presenting the local ledger as an exchange.
+    exchange = history.get("exchange", pd.Series("", index=history.index))
+    exchange = exchange.fillna("").astype(str).str.strip().str.upper()
+    history["exchange"] = exchange.mask(exchange.eq(""), "UNAVAILABLE")
+    history["status"] = "filled"
+    history["filled_quantity"] = history["quantity"]
+    history["type"] = "execution"
+    history["source"] = "Nova ledger"
+    return history.reindex(columns=columns)
 
 
 def _ticker_for(symbol: str) -> str:
@@ -163,7 +212,7 @@ def marked_strategy_pnl(ledger: pd.DataFrame, base_currency: str) -> pd.DataFram
     return pd.DataFrame(rows, columns=columns)
 
 
-def append_pnl_snapshot(sleeves: pd.DataFrame) -> pd.DataFrame:
+def append_pnl_snapshot(sleeves: pd.DataFrame, *, append: bool = True) -> pd.DataFrame:
     """Store at most one marked-P&L point per minute for each strategy."""
 
     now = datetime.now(timezone.utc)
@@ -171,7 +220,7 @@ def append_pnl_snapshot(sleeves: pd.DataFrame) -> pd.DataFrame:
     if not history.empty:
         history["timestamp"] = pd.to_datetime(history["timestamp"], utc=True, errors="coerce")
     latest = history["timestamp"].max() if not history.empty else pd.NaT
-    if pd.isna(latest) or (now - latest).total_seconds() >= 55:
+    if append and (pd.isna(latest) or (now - latest).total_seconds() >= 55):
         new_rows = sleeves.loc[sleeves["gross_pnl_base"].notna(), ["strategy", "gross_pnl_base"]].copy()
         new_rows["timestamp"] = now
         history = pd.concat([history, new_rows[["timestamp", "strategy", "gross_pnl_base"]]], ignore_index=True)

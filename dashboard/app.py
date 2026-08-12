@@ -49,6 +49,7 @@ def render_account() -> None:
     history: pd.DataFrame = data["history"]
     positions: pd.DataFrame = data["positions"]
     orders: pd.DataFrame = data["orders"]
+    order_history: pd.DataFrame = data["order_history"]
     fx_hedges: pd.DataFrame = data["fx_hedges"]
     strategy_sleeves: pd.DataFrame = data["strategy_sleeves"]
     strategy_history: pd.DataFrame = data["strategy_history"]
@@ -70,7 +71,7 @@ def render_account() -> None:
             chart.update_layout(hovermode="x unified")
             st.plotly_chart(chart, width="stretch", config={"scrollZoom": True, "displaylogo": False})
         st.subheader("Nova strategy-attributed gross P&L")
-        st.caption("Calculated locally from Nova-tagged fills and external Yahoo marks. It excludes manual/untagged IBKR activity and is gross of commissions; the TWS equity chart above remains the authoritative total-account value.")
+        st.caption("Calculated locally from Nova-tagged fills and external Yahoo marks. It excludes manual/untagged IBKR activity and is gross of commissions; marks refresh at most every five minutes so current TWS orders and positions remain responsive. The TWS equity chart above remains the authoritative total-account value.")
         if strategy_sleeves.empty:
             st.info("No Nova-tagged executions have been observed for strategy attribution yet.")
         else:
@@ -136,34 +137,47 @@ def render_account() -> None:
             formats = {"stock_native_exposure": "{:,.2f}", "cash_native_balance": "{:,.2f}", "net_native_exposure": "{:,.2f}", "net_base_exposure": "{:,.2f}"}
             st.dataframe(fx_hedges.style.format({key: value for key, value in formats.items() if key in fx_hedges}), width="stretch", hide_index=True)
     with order_view:
-        st.caption("Nova orders carry a `nova-…` order reference.")
-        if orders.empty:
-            st.info("No open orders or session executions returned by TWS.")
+        st.caption("TWS returns today's activity. Earlier Nova-tagged fills are retained in the local Nova ledger from the time this dashboard first observed them.")
+        st.caption(f"TWS currently reports {len(orders)} open-order/execution record(s) for this session.")
+        if order_history.empty:
+            st.info("No locally recorded Nova executions or current TWS open orders are available.")
         else:
             # Prefer friendly market labels, but accept raw broker exchange
             # values from older callback/session rows as a reliable fallback.
-            market_column = "market" if "market" in orders.columns else "exchange"
+            market_column = "market" if "market" in order_history.columns else "exchange"
             exchange_options = ["All exchanges"]
-            if market_column in orders.columns:
-                exchange_options.extend(sorted({value for value in orders[market_column].dropna().astype(str) if value.strip()}))
-            selector_left, selector_right = st.columns(2)
-            selected_stock = selector_left.text_input(
+            if market_column in order_history.columns:
+                exchange_options.extend(sorted({value for value in order_history[market_column].dropna().astype(str) if value.strip()}))
+            selector_ticker, selector_exchange, selector_day = st.columns(3)
+            selected_stock = selector_ticker.text_input(
                 "Find orders by ticker",
                 key="ticker_filter",
                 placeholder="Type a ticker, e.g. MC, ASML, AAPL",
                 help="Matches the ticker exactly, ignoring upper/lower case. Click a Positions-table row to fill this automatically.",
             ).strip().upper()
-            selected_exchange = selector_right.selectbox("Filter exchange", exchange_options)
-            filtered_orders = orders.copy()
+            selected_exchange = selector_exchange.selectbox("Filter exchange", exchange_options)
+            filtered_orders = order_history.copy()
+            filtered_orders["trading_date"] = pd.to_datetime(
+                filtered_orders["submitted_at"], format="mixed", utc=True, errors="coerce"
+            ).dt.date
+            trading_dates = sorted(filtered_orders["trading_date"].dropna().unique(), reverse=True)
+            selected_day = selector_day.selectbox(
+                "Trading day",
+                ["All recorded dates", *trading_dates],
+                format_func=lambda value: value if isinstance(value, str) else value.isoformat(),
+            )
+            if selected_day != "All recorded dates":
+                filtered_orders = filtered_orders[filtered_orders["trading_date"] == selected_day]
             if selected_stock:
                 filtered_orders = filtered_orders[filtered_orders["symbol"].astype(str) == selected_stock]
             if selected_exchange != "All exchanges" and market_column in filtered_orders.columns:
                 filtered_orders = filtered_orders[filtered_orders[market_column] == selected_exchange]
             st.caption(f"Showing {len(filtered_orders)} order/execution record(s).")
-            counts = orders.groupby(["strategy", "status"], dropna=False).size().reset_index(name="orders")
+            counts = filtered_orders.groupby(["strategy", "status"], dropna=False).size().reset_index(name="orders")
             st.plotly_chart(px.bar(counts, x="strategy", y="orders", color="status", barmode="stack", title="Orders by strategy and status"), width="stretch", config={"displaylogo": False})
             if "submitted_at" in filtered_orders:
                 filtered_orders = filtered_orders.sort_values("submitted_at", ascending=False, na_position="last")
+            filtered_orders = filtered_orders.drop(columns=["trading_date"], errors="ignore")
             st.dataframe(filtered_orders.style.format({"quantity": "{:,.4f}", "filled_quantity": "{:,.4f}", "filled_avg_price": "{:,.4f}"}), width="stretch", hide_index=True)
 
 

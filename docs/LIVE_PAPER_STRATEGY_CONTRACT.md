@@ -116,3 +116,8 @@ The strategy chart excludes manual and untagged IBKR activity, is gross of
 commissions, and begins accumulating when the dashboard first observes the
 execution. It must not be summed with the TWS account-equity value or treated
 as a broker-reported sub-account NAV.
+
+The Orders tab includes a **Trading day** selector. TWS supplies its current
+session/day executions; older Nova-tagged fills come from the same local
+execution ledger and are available only from the date the dashboard first
+observed them onward.
