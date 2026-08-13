@@ -13,7 +13,7 @@ import os
 import sys
 from datetime import date, datetime
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from time import monotonic
 from typing import Any
 
@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
 
 from core.main_executor import load_local_env
 from dashboard.ibkr_account import load_paper_account_data
+from dashboard.portfolio_classification import enrich_positions, exposure_by
 
 
 def _json_value(value: Any) -> Any:
@@ -71,6 +72,7 @@ _CACHE_SECONDS = 15.0
 _snapshot_cache: dict[str, Any] | None = None
 _snapshot_cached_at = 0.0
 _snapshot_lock = Lock()
+_snapshot_refreshing = False
 
 
 @app.get("/health")
@@ -78,45 +80,70 @@ def health() -> dict[str, str]:
     return {"status": "ok", "scope": "local read-only"}
 
 
+def _load_snapshot() -> dict[str, Any]:
+    """Build one durable API snapshot outside request handling when possible."""
+
+    snapshot = load_paper_account_data()
+    positions = enrich_positions(snapshot["positions"])
+    return json.loads(
+        json.dumps(
+            {
+                "account": snapshot["account"],
+                "base_currency": snapshot["base_currency"],
+                "loaded_at": snapshot["loaded_at"],
+                "history": _records(snapshot["history"]),
+                "positions": _records(positions),
+                "geographic_exposure": _records(exposure_by(positions, "region")),
+                "sector_exposure": _records(exposure_by(positions, "sector")),
+                "strategy_sleeves": _records(snapshot["strategy_sleeves"]),
+                "strategy_history": _records(snapshot["strategy_history"]),
+            },
+            default=_json_value,
+        )
+    )
+
+
+def _refresh_snapshot() -> None:
+    """Refresh in the background so a slow broker query never blocks the UI."""
+
+    global _snapshot_cache, _snapshot_cached_at, _snapshot_refreshing
+    try:
+        refreshed = _load_snapshot()
+        with _snapshot_lock:
+            _snapshot_cache = refreshed
+            _snapshot_cached_at = monotonic()
+    finally:
+        with _snapshot_lock:
+            _snapshot_refreshing = False
+
+
 @app.get("/api/portfolio")
 def portfolio() -> dict[str, Any]:
     """Return current local TWS data plus the durable Nova strategy ledger."""
 
-    global _snapshot_cache, _snapshot_cached_at
+    global _snapshot_cache, _snapshot_cached_at, _snapshot_refreshing
     with _snapshot_lock:
         if _snapshot_cache is not None and monotonic() - _snapshot_cached_at < _CACHE_SECONDS:
             return _snapshot_cache
-        try:
-            snapshot = load_paper_account_data()
-        except Exception as exc:
-            # Preserve the last verified local state across a brief TWS/Yahoo
-            # delay instead of making the website blank during an update.
-            if _snapshot_cache is not None:
+        # First request needs a source-of-truth snapshot. Thereafter return the
+        # last verified snapshot immediately and refresh asynchronously.
+        if _snapshot_cache is None:
+            try:
+                _snapshot_cache = _load_snapshot()
+                _snapshot_cached_at = monotonic()
                 return _snapshot_cache
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Could not load local IBKR paper-account data. Confirm paper TWS is running "
-                    "and socket clients are enabled. "
-                    f"Details: {exc}"
-                ),
-            ) from exc
-
-        _snapshot_cache = json.loads(
-            json.dumps(
-                {
-                    "account": snapshot["account"],
-                    "base_currency": snapshot["base_currency"],
-                    "loaded_at": snapshot["loaded_at"],
-                    "history": _records(snapshot["history"]),
-                    "positions": _records(snapshot["positions"]),
-                    "strategy_sleeves": _records(snapshot["strategy_sleeves"]),
-                    "strategy_history": _records(snapshot["strategy_history"]),
-                },
-                default=_json_value,
-            )
-        )
-        _snapshot_cached_at = monotonic()
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Could not load local IBKR paper-account data. Confirm paper TWS is running "
+                        "and socket clients are enabled. "
+                        f"Details: {exc}"
+                    ),
+                ) from exc
+        if not _snapshot_refreshing:
+            _snapshot_refreshing = True
+            Thread(target=_refresh_snapshot, name="portfolio-snapshot-refresh", daemon=True).start()
         return _snapshot_cache
 
 

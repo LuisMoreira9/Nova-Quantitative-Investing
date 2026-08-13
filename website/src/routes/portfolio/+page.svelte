@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { LineChart } from 'layerchart';
+	import { BarChart, LineChart } from 'layerchart';
 	import { scaleUtc } from 'd3-scale';
 	import RefreshCw from '@lucide/svelte/icons/refresh-cw';
 	import Wifi from '@lucide/svelte/icons/wifi';
@@ -8,12 +8,22 @@
 	import * as Chart from '$lib/components/ui/chart/index.js';
 
 	type Row = Record<string, string | number | null>;
+	type ExposureSlice = {
+		label: string;
+		value: number;
+		weight: number;
+		positionCount: number;
+		topPositions: { symbol: string; value: number }[];
+		color: string;
+	};
 	type PortfolioPayload = {
 		account: Record<string, string>;
 		base_currency: string;
 		loaded_at: string;
 		history: Row[];
 		positions: Row[];
+		geographic_exposure: Row[];
+		sector_exposure: Row[];
 		strategy_sleeves: Row[];
 		strategy_history: Row[];
 	};
@@ -25,6 +35,7 @@
 	let error = $state<string | null>(null);
 	let loading = $state(true);
 	let selectedStrategy = $state('All strategies');
+	let activeExposure = $state<{ chart: string; label: string } | null>(null);
 
 	const baseCurrency = $derived(portfolio?.base_currency ?? 'EUR');
 	const strategyNames: Record<string, string> = {
@@ -86,12 +97,87 @@
 
 	const totalEquityDomain = $derived(paddedDomain(totalSeries.map((row) => row.equity)));
 	const strategyPnlDomain = $derived(paddedDomain(strategySeries.map((row) => row.pnl)));
+	const exposurePalette = ['#38bdf8', '#f97316', '#22c55e', '#eab308', '#ec4899', '#14b8a6', '#ef4444', '#a3e635'];
+
+	function buildExposure(rows: Row[]): ExposureSlice[] {
+		return rows
+			.map((row, index) => ({
+				label: String(row.label ?? 'Unclassified'),
+				value: Number(row.value),
+				weight: Number(row.weight),
+				positionCount: Number(row.position_count),
+				topPositions: Array.isArray(row.top_positions)
+					? row.top_positions.map((position) => ({ symbol: String(position.symbol), value: Number(position.value) }))
+					: [],
+				color: exposurePalette[index % exposurePalette.length]
+			}))
+			.filter((row) => Number.isFinite(row.value) && row.value > 0)
+			.map((row) => ({
+				...row,
+				weight: Number.isFinite(row.weight) ? row.weight : 0,
+				positionCount: Number.isFinite(row.positionCount) ? row.positionCount : 0
+			}));
+	}
+
+	function polar(angle: number, radius: number) {
+		const radians = ((angle - 90) * Math.PI) / 180;
+		return { x: 50 + radius * Math.cos(radians), y: 50 + radius * Math.sin(radians) };
+	}
+
+	function donutPath(start: number, end: number) {
+		const span = end - start;
+		if (span >= 359.999) return 'M 50 2 A 48 48 0 1 1 49.99 2 Z M 50 20 A 30 30 0 1 0 50.01 20 Z';
+		const outerStart = polar(start, 48);
+		const outerEnd = polar(end, 48);
+		const innerEnd = polar(end, 30);
+		const innerStart = polar(start, 30);
+		const largeArc = span > 180 ? 1 : 0;
+		return `M ${outerStart.x} ${outerStart.y} A 48 48 0 ${largeArc} 1 ${outerEnd.x} ${outerEnd.y} L ${innerEnd.x} ${innerEnd.y} A 30 30 0 ${largeArc} 0 ${innerStart.x} ${innerStart.y} Z`;
+	}
+
+	function donutSegments(slices: ExposureSlice[]) {
+		let angle = 0;
+		return slices.map((slice) => {
+			const start = angle;
+			angle += slice.weight * 360;
+			return { ...slice, path: donutPath(start, angle) };
+		});
+	}
+
+	function selectExposure(chart: string, slice: ExposureSlice) {
+		activeExposure = { chart, label: slice.label };
+	}
+
+	function clearExposure(chart: string) {
+		if (activeExposure?.chart === chart) activeExposure = null;
+	}
+
+	const geographicExposure = $derived(buildExposure(portfolio?.geographic_exposure ?? []));
+	const sectorExposure = $derived(buildExposure(portfolio?.sector_exposure ?? []));
+	const positionSeries = $derived(
+		(portfolio?.positions ?? [])
+			.map((position) => {
+				const baseValue = Number(position.native_market_value_base);
+				const nativeValue = Number(position.market_value);
+
+				return {
+					symbol: String(position.symbol),
+					value: Number.isFinite(baseValue) ? baseValue : nativeValue,
+					side: Number(position.quantity) < 0 ? 'Short' : 'Long'
+				};
+			})
+			.filter((position) => Number.isFinite(position.value))
+			.sort((left, right) => left.value - right.value)
+	);
 
 	const totalChartConfig = {
 		equity: { label: 'Account equity', color: 'var(--chart-1)' }
 	} satisfies Chart.ChartConfig;
 	const strategyChartConfig = {
 		pnl: { label: 'Gross P&L', color: 'var(--chart-2)' }
+	} satisfies Chart.ChartConfig;
+	const positionChartConfig = {
+		value: { label: 'Market value', color: 'var(--chart-3)' }
 	} satisfies Chart.ChartConfig;
 
 	function money(value: string | number | null | undefined, currency = baseCurrency) {
@@ -258,6 +344,105 @@
 				</Card.Content>
 			</Card.Root>
 		</div>
+
+		<div class="mt-6 grid gap-6 lg:grid-cols-2">
+			{#each [
+				{ title: 'Geographic exposure', description: 'Gross base-currency exposure by investment region.', slices: geographicExposure },
+				{ title: 'Sector exposure', description: 'Gross base-currency exposure by sector classification.', slices: sectorExposure }
+			] as chart}
+				<Card.Root class="border bg-card/50">
+					<Card.Header>
+						<Card.Title>{chart.title}</Card.Title>
+						<Card.Description>{chart.description}</Card.Description>
+					</Card.Header>
+					<Card.Content>
+						{#if chart.slices.length > 0}
+							<div class="grid items-center gap-8 sm:grid-cols-[11rem_1fr]">
+								<div class="relative mx-auto size-44">
+									<svg viewBox="0 0 100 100" class="size-full" aria-label={chart.title} role="img">
+										{#each donutSegments(chart.slices) as slice}
+											<path
+												d={slice.path}
+												fill={slice.color}
+												class="origin-center cursor-pointer transition-[opacity,transform] duration-150 hover:opacity-80 focus:opacity-80"
+												class:opacity-35={activeExposure?.chart === chart.title && activeExposure?.label !== slice.label}
+												tabindex="0"
+												role="button"
+												aria-label={`${slice.label}: ${(slice.weight * 100).toFixed(1)}%`}
+												onmouseenter={() => selectExposure(chart.title, slice)}
+												onfocus={() => selectExposure(chart.title, slice)}
+												onmouseleave={() => clearExposure(chart.title)}
+												onblur={() => clearExposure(chart.title)}
+											/>
+										{/each}
+									</svg>
+									<div class="pointer-events-none absolute inset-7 grid place-items-center rounded-full bg-card text-center">
+										<span class="text-xs text-muted-foreground">Gross exposure</span>
+									</div>
+								</div>
+								<div class="space-y-2">
+									{#each chart.slices as slice}
+										<button
+											type="button"
+											class="w-full rounded-md px-2 py-1 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+											class:bg-muted={activeExposure?.chart === chart.title && activeExposure?.label === slice.label}
+											onmouseenter={() => selectExposure(chart.title, slice)}
+											onfocus={() => selectExposure(chart.title, slice)}
+											onmouseleave={() => clearExposure(chart.title)}
+											onblur={() => clearExposure(chart.title)}
+										>
+										<div class="flex items-center justify-between gap-3 text-sm">
+											<span class="flex min-w-0 items-center gap-2"><span class="size-2.5 shrink-0 rounded-full" style={`background-color: ${slice.color}`}></span><span class="truncate">{slice.label}</span></span>
+											<span class="shrink-0 text-muted-foreground">{(slice.weight * 100).toFixed(1)}%</span>
+										</div>
+										</button>
+									{/each}
+									<div class="min-h-16 border-t pt-2 text-xs text-muted-foreground">
+										{#if activeExposure?.chart === chart.title}
+											{@const activeSlice = chart.slices.find((slice) => slice.label === activeExposure?.label)}
+											{#if activeSlice}
+												<p>{activeSlice.label}: {money(activeSlice.value)} gross exposure · {activeSlice.positionCount} position{activeSlice.positionCount === 1 ? '' : 's'}</p>
+												<p class="mt-1">Largest: {activeSlice.topPositions.map((position) => `${position.symbol} (${money(position.value)})`).join(', ') || '—'}</p>
+											{/if}
+										{:else}
+											<p>Hover a category or the chart to inspect its gross exposure and largest holdings.</p>
+										{/if}
+									</div>
+								</div>
+							</div>
+						{:else}
+							<p class="py-12 text-center text-sm text-muted-foreground">Classification data will appear with the next local portfolio snapshot.</p>
+						{/if}
+					</Card.Content>
+				</Card.Root>
+			{/each}
+		</div>
+
+		<Card.Root class="mt-6 border bg-card/50">
+			<Card.Header>
+				<Card.Title>Position sizes by market value</Card.Title>
+				<Card.Description>
+					Values converted to {baseCurrency}. Short positions appear below zero.
+				</Card.Description>
+			</Card.Header>
+			<Card.Content>
+				{#if positionSeries.length > 0}
+					<Chart.Container config={positionChartConfig} class="h-115 w-full">
+						<BarChart
+							data={positionSeries}
+							x="symbol"
+							y="value"
+							axis="y"
+							series={[{ key: 'value', label: 'Market value', color: positionChartConfig.value.color }]}
+						/>
+					</Chart.Container>
+				{:else}
+					<p class="flex h-130 items-center justify-center text-sm text-muted-foreground">
+						No open positions are currently reported by the local paper account.
+					</p>
+				{/if}
+			</Card.Content>
+		</Card.Root>
 
 		<Card.Root class="mt-6 border bg-card/50">
 			<Card.Header>
