@@ -7,7 +7,7 @@
 	import * as Card from '$lib/components/ui/card/index.js';
 	import * as Chart from '$lib/components/ui/chart/index.js';
 
-	type Row = Record<string, string | number | null>;
+	type Row = Record<string, unknown>;
 	type ExposureSlice = {
 		label: string;
 		value: number;
@@ -101,16 +101,22 @@
 
 	function buildExposure(rows: Row[]): ExposureSlice[] {
 		return rows
-			.map((row, index) => ({
-				label: String(row.label ?? 'Unclassified'),
-				value: Number(row.value),
-				weight: Number(row.weight),
-				positionCount: Number(row.position_count),
-				topPositions: Array.isArray(row.top_positions)
-					? row.top_positions.map((position) => ({ symbol: String(position.symbol), value: Number(position.value) }))
-					: [],
-				color: exposurePalette[index % exposurePalette.length]
-			}))
+			.map((row, index) => {
+				const holdings = row.top_positions ?? row.topPositions;
+				return {
+					label: String(row.label ?? 'Unclassified'),
+					value: Number(row.value),
+					weight: Number(row.weight),
+					positionCount: Number(row.position_count ?? row.positionCount),
+					topPositions: Array.isArray(holdings)
+						? holdings.map((position) => {
+							const holding = position as Record<string, string | number | null>;
+							return { symbol: String(holding.symbol), value: Number(holding.value) };
+						})
+						: [],
+					color: exposurePalette[index % exposurePalette.length]
+				};
+			})
 			.filter((row) => Number.isFinite(row.value) && row.value > 0)
 			.map((row) => ({
 				...row,

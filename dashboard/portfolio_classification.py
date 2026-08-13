@@ -132,8 +132,8 @@ def exposure_by(positions: pd.DataFrame, column: str) -> pd.DataFrame:
     working["_gross_value"] = values
     for label, group in working.groupby(column, dropna=False):
         top_positions[str(label) if pd.notna(label) else "Unclassified"] = [
-            {"symbol": str(row.symbol), "value": float(row._gross_value)}
-            for row in group.sort_values("_gross_value", ascending=False).head(3).itertuples()
+            {"symbol": str(row["symbol"]), "value": float(row["_gross_value"])}
+            for _, row in group.sort_values("_gross_value", ascending=False).head(3).iterrows()
         ]
     grouped["top_positions"] = grouped["label"].map(top_positions)
     grouped = grouped.sort_values("value", ascending=False)
