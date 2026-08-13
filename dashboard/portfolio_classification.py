@@ -84,11 +84,38 @@ def _infer_sector(symbol: str) -> str:
     """
 
     sectors = {
-        "AAPL": "Information Technology", "MSFT": "Information Technology", "NVDA": "Information Technology",
-        "META": "Communication Services", "AMZN": "Consumer Discretionary", "TSLA": "Consumer Discretionary",
-        "ASML": "Information Technology", "SAP": "Information Technology", "AIR": "Industrials",
-        "MC": "Consumer Discretionary", "OR": "Consumer Staples", "SAN": "Financials",
-        "ALV": "Financials", "IBE": "Utilities", "SAF": "Industrials", "SIE": "Industrials",
+        # Information Technology
+        "AAPL": "Information Technology", "AMAT": "Information Technology", "ASML": "Information Technology",
+        "AVGO": "Information Technology", "CIEN": "Information Technology", "COHR": "Information Technology",
+        "HPE": "Information Technology", "JKHY": "Information Technology", "NOW": "Information Technology",
+        "PTC": "Information Technology", "ROP": "Information Technology", "SAP": "Information Technology",
+        "VRSN": "Information Technology",
+        # Communication Services
+        "LYV": "Communication Services", "META": "Communication Services", "PSKY": "Communication Services",
+        "TTWO": "Communication Services",
+        # Consumer Discretionary
+        "AMZN": "Consumer Discretionary", "CVNA": "Consumer Discretionary", "DHI": "Consumer Discretionary",
+        "DPZ": "Consumer Discretionary", "LEN": "Consumer Discretionary", "LOW": "Consumer Discretionary",
+        "MGM": "Consumer Discretionary", "RCL": "Consumer Discretionary", "ROST": "Consumer Discretionary",
+        "TPR": "Consumer Discretionary", "TJX": "Consumer Discretionary", "ULTA": "Consumer Discretionary",
+        "WSM": "Consumer Discretionary",
+        # Consumer Staples
+        "HSY": "Consumer Staples", "KHC": "Consumer Staples", "OR": "Consumer Staples", "PG": "Consumer Staples",
+        "PM": "Consumer Staples", "SJM": "Consumer Staples", "STZ": "Consumer Staples", "SYY": "Consumer Staples",
+        # Health Care
+        "ALGN": "Health Care", "DHR": "Health Care", "GILD": "Health Care", "HUM": "Health Care",
+        "IDXX": "Health Care", "MDT": "Health Care", "RVTY": "Health Care", "TMO": "Health Care",
+        "UHS": "Health Care", "WST": "Health Care", "ZBH": "Health Care", "ZTS": "Health Care",
+        # Financials
+        "CINF": "Financials", "GL": "Financials", "HOOD": "Financials", "MC": "Financials",
+        "MSCI": "Financials", "SAN": "Financials", "UCG": "Financials",
+        # Industrials
+        "AIR": "Industrials", "AOS": "Industrials", "CPRT": "Industrials", "DOV": "Industrials",
+        "EXPD": "Industrials", "FDXF": "Industrials", "HUBB": "Industrials", "MAS": "Industrials",
+        "PNR": "Industrials", "SAF": "Industrials", "SIE": "Industrials", "SWK": "Industrials",
+        # Materials, Utilities and Real Estate
+        "ALB": "Materials", "MLM": "Materials", "PPG": "Materials", "SW": "Materials",
+        "SRE": "Utilities", "IBE": "Utilities", "CSGP": "Real Estate",
     }
     return sectors.get(symbol, "Unclassified")
 
