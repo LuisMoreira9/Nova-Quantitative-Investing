@@ -36,6 +36,7 @@
 	let loading = $state(true);
 	let selectedStrategy = $state('All strategies');
 	let activeExposure = $state<{ chart: string; label: string } | null>(null);
+	let expandedExposureCharts = $state<Record<string, boolean>>({});
 
 	const baseCurrency = $derived(portfolio?.base_currency ?? 'EUR');
 	const strategyNames: Record<string, string> = {
@@ -156,6 +157,10 @@
 
 	function clearExposure(chart: string) {
 		if (activeExposure?.chart === chart) activeExposure = null;
+	}
+
+	function toggleExposureLegend(chart: string) {
+		expandedExposureCharts = { ...expandedExposureCharts, [chart]: !expandedExposureCharts[chart] };
 	}
 
 	const geographicExposure = $derived(buildExposure(portfolio?.geographic_exposure ?? []));
@@ -387,7 +392,7 @@
 									</div>
 								</div>
 								<div class="space-y-2">
-									{#each chart.slices as slice}
+									{#each (expandedExposureCharts[chart.title] ? chart.slices : chart.slices.slice(0, 4)) as slice}
 										<button
 											type="button"
 											class="w-full rounded-md px-2 py-1 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
@@ -403,6 +408,15 @@
 										</div>
 										</button>
 									{/each}
+									{#if chart.slices.length > 4}
+										<button
+											type="button"
+											class="w-full rounded-md border px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+											onclick={() => toggleExposureLegend(chart.title)}
+										>
+											{expandedExposureCharts[chart.title] ? 'Show top 4' : `View all ${chart.slices.length}`}
+										</button>
+									{/if}
 									<div class="min-h-16 border-t pt-2 text-xs text-muted-foreground">
 										{#if activeExposure?.chart === chart.title}
 											{@const activeSlice = chart.slices.find((slice) => slice.label === activeExposure?.label)}
