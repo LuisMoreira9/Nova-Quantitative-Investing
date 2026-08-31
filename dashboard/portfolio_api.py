@@ -107,6 +107,11 @@ def _load_snapshot() -> dict[str, Any]:
                 "sector_exposure": _records(exposure_by(positions, "sector")),
                 "strategy_sleeves": _records(snapshot["strategy_sleeves"]),
                 "strategy_history": _records(snapshot["strategy_history"]),
+                # The publisher filters this further before anything reaches
+                # Supabase.  Keeping it in the local payload lets the local
+                # and hosted dashboard use the same display shape.
+                "executions": _records(snapshot["order_history"]),
+                "fx_hedges": _records(snapshot["fx_hedges"]),
             },
             default=_json_value,
         )

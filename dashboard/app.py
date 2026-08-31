@@ -16,12 +16,20 @@ if str(ROOT) not in sys.path:
 
 from core.main_executor import load_local_env
 from dashboard.ibkr_account import load_paper_account_data
+from dashboard.supabase_reader import load_hosted_dashboard_data
 
 
 st.set_page_config(page_title="Nova IBKR Paper Trading", page_icon="📈", layout="wide")
 load_local_env()
+DATA_SOURCE = os.getenv("NOVA_DASHBOARD_DATA_SOURCE", "ibkr").strip().lower()
+if DATA_SOURCE not in {"ibkr", "supabase"}:
+    raise RuntimeError("NOVA_DASHBOARD_DATA_SOURCE must be ibkr or supabase.")
 st.title("Nova IBKR Paper Trading Dashboard")
-st.caption("Read-only view of the local TWS simulated account. It cannot submit, modify, or cancel orders.")
+st.caption(
+    "Read-only view of the hosted paper portfolio. It cannot submit, modify, or cancel orders."
+    if DATA_SOURCE == "supabase"
+    else "Read-only view of the local TWS simulated account. It cannot submit, modify, or cancel orders."
+)
 if st.sidebar.button("Refresh account data"):
     st.rerun()
 REFRESH_SECONDS = max(5, int(os.getenv("NOVA_DASHBOARD_REFRESH_SECONDS", "10")))
@@ -29,13 +37,9 @@ st.sidebar.caption(f"Account data auto-refreshes every {REFRESH_SECONDS} seconds
 
 
 def load_data() -> dict:
-    """Use a fresh TWS snapshot on each scheduled dashboard refresh.
+    """Read from TWS locally or the hosted Supabase mirror."""
 
-    Caching this response can retain an older DataFrame schema after the
-    adapter gains fields such as ``market``. The dashboard refresh cadence is
-    already one minute, so a cache provides no meaningful protection here.
-    """
-    return load_paper_account_data()
+    return load_hosted_dashboard_data() if DATA_SOURCE == "supabase" else load_paper_account_data()
 
 
 @st.fragment(run_every=REFRESH_SECONDS)
@@ -44,7 +48,8 @@ def render_account() -> None:
     try:
         data = load_data()
     except Exception as exc:
-        st.error(f"Could not load IBKR paper-account data: {exc}")
+        source = "hosted Supabase" if DATA_SOURCE == "supabase" else "IBKR paper-account"
+        st.error(f"Could not load {source} data: {exc}")
         return
 
     account = data["account"]
@@ -139,8 +144,11 @@ def render_account() -> None:
             formats = {"stock_native_exposure": "{:,.2f}", "cash_native_balance": "{:,.2f}", "net_native_exposure": "{:,.2f}", "net_base_exposure": "{:,.2f}"}
             st.dataframe(fx_hedges.style.format({key: value for key, value in formats.items() if key in fx_hedges}), width="stretch", hide_index=True)
     with order_view:
-        st.caption("TWS returns today's activity. Earlier Nova-tagged fills are retained in the local Nova ledger from the time this dashboard first observed them.")
-        st.caption(f"TWS currently reports {len(orders)} open-order/execution record(s) for this session.")
+        if DATA_SOURCE == "supabase":
+            st.caption("Durable Nova fills are read from Supabase. Open TWS orders are not exposed to the hosted dashboard.")
+        else:
+            st.caption("TWS returns today's activity. Earlier Nova-tagged fills are retained in the local Nova ledger from the time this dashboard first observed them.")
+            st.caption(f"TWS currently reports {len(orders)} open-order/execution record(s) for this session.")
         if order_history.empty:
             st.info("No locally recorded Nova executions or current TWS open orders are available.")
         else:
