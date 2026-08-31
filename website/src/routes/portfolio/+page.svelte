@@ -29,7 +29,9 @@
 	};
 
 	const apiUrl = 'http://127.0.0.1:8765/api/portfolio';
-	const refreshEveryMs = 15_000;
+	// The local bridge caches a broker snapshot for five seconds. Poll at the
+	// same cadence so a paper fill appears promptly without reloading the page.
+	const refreshEveryMs = 5_000;
 
 	let portfolio = $state<PortfolioPayload | null>(null);
 	let error = $state<string | null>(null);
@@ -256,7 +258,7 @@
 			</div>
 			<div class="flex items-center gap-3 text-sm text-muted-foreground">
 				<Wifi class={['size-4', error ? 'text-destructive' : 'text-primary']} />
-				<span>{error ? 'Local bridge unavailable' : 'Updating in place every 15 seconds'}</span>
+				<span>{error ? 'Local bridge unavailable' : 'Updating in place every 5 seconds'}</span>
 				<button
 					onclick={() => void refreshPortfolio()}
 					class="inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-foreground transition-colors hover:bg-muted"

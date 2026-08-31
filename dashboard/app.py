@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -23,7 +24,8 @@ st.title("Nova IBKR Paper Trading Dashboard")
 st.caption("Read-only view of the local TWS simulated account. It cannot submit, modify, or cancel orders.")
 if st.sidebar.button("Refresh account data"):
     st.rerun()
-st.sidebar.caption("Account data auto-refreshes every 60 seconds.")
+REFRESH_SECONDS = max(5, int(os.getenv("NOVA_DASHBOARD_REFRESH_SECONDS", "10")))
+st.sidebar.caption(f"Account data auto-refreshes every {REFRESH_SECONDS} seconds.")
 
 
 def load_data() -> dict:
@@ -36,9 +38,9 @@ def load_data() -> dict:
     return load_paper_account_data()
 
 
-@st.fragment(run_every=60)
+@st.fragment(run_every=REFRESH_SECONDS)
 def render_account() -> None:
-    """Render a fragment that polls TWS once per minute."""
+    """Render only the account fragment on the configured polling cadence."""
     try:
         data = load_data()
     except Exception as exc:

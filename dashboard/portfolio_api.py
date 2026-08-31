@@ -8,6 +8,7 @@ It deliberately binds to localhost so it is not reachable from the network.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import sys
@@ -30,6 +31,9 @@ if str(ROOT) not in sys.path:
 from core.main_executor import load_local_env
 from dashboard.ibkr_account import load_paper_account_data
 from dashboard.portfolio_classification import enrich_positions, exposure_by
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _json_value(value: Any) -> Any:
@@ -68,7 +72,10 @@ app.add_middleware(
     allow_headers=[],
 )
 
-_CACHE_SECONDS = 15.0
+# Keep the website responsive after a paper fill without turning every browser
+# refresh into an account query.  The value can be raised on a constrained host
+# through NOVA_PORTFOLIO_API_CACHE_SECONDS.
+_CACHE_SECONDS = max(1.0, float(os.getenv("NOVA_PORTFOLIO_API_CACHE_SECONDS", "5")))
 _snapshot_cache: dict[str, Any] | None = None
 _snapshot_cached_at = 0.0
 _snapshot_lock = Lock()
@@ -83,7 +90,10 @@ def health() -> dict[str, str]:
 def _load_snapshot() -> dict[str, Any]:
     """Build one durable API snapshot outside request handling when possible."""
 
-    snapshot = load_paper_account_data()
+    # Streamlit uses the default read-only client ID offset (+1). Keep the
+    # website bridge on a separate connection so its refresh cannot evict the
+    # dashboard from TWS (IBKR error 326).
+    snapshot = load_paper_account_data(client_id_offset=2)
     positions = enrich_positions(snapshot["positions"])
     return json.loads(
         json.dumps(
@@ -112,6 +122,11 @@ def _refresh_snapshot() -> None:
         with _snapshot_lock:
             _snapshot_cache = refreshed
             _snapshot_cached_at = monotonic()
+    except Exception as exc:
+        # The previous verified snapshot remains available to the website.
+        # Do not let a transient TWS response turn into an unhandled thread
+        # exception or erase usable portfolio data.
+        LOGGER.warning("Background portfolio refresh failed: %s", exc)
     finally:
         with _snapshot_lock:
             _snapshot_refreshing = False

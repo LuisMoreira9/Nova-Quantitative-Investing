@@ -99,11 +99,14 @@ def _strategy_sleeves_for_dashboard(ledger: pd.DataFrame, base_currency: str) ->
     return sleeves, True
 
 
-def load_paper_account_data() -> dict[str, Any]:
+def load_paper_account_data(*, client_id_offset: int = 1) -> dict[str, Any]:
     """Read current account data from TWS without placing or altering orders."""
 
     host, port, client_id = ibkr_connection_settings()
-    client = IBKRClient(host, port, client_id + 1)
+    # Every simultaneously running local reader needs a distinct TWS API
+    # client ID. Streamlit keeps the default (+1); the website bridge passes
+    # its own offset so the two dashboards cannot disconnect one another.
+    client = IBKRClient(host, port, client_id + client_id_offset)
     client.connect_and_start()
     try:
         account = client.get_account()
