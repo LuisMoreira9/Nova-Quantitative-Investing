@@ -2,6 +2,17 @@
 .env
 *.env
 
+# Runtime output, including timestamped launches and recovery attempts.
+/data/*.log
+
+# Local diagnostic snapshots and reports (may contain account details).
+/data/portfolio_api_check.json
+/data/portfolio_sector_audit.json
+/data/sector_audit.txt
+
+# Machine-local ownership record for the opt-in held-short paper test.
+/data/europe_short_hold_paper_state.json
+
 # Locally accumulated IBKR dashboard history.
 data/ibkr_account_history.csv
 data/nova_strategy_execution_ledger.csv
