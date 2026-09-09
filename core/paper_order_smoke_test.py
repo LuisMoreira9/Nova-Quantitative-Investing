@@ -34,7 +34,7 @@ def main() -> None:
         risk = RiskGateway(broker)
         account = broker.get_account()
         buy = {"symbol": instrument_id, "action": "BUY", "qty": quantity}
-        decision = risk.evaluate(buy, account)
+        decision = risk.evaluate(buy, account, broker.get_portfolio())
         if not decision.approved:
             raise SystemExit(f"Buy rejected by risk gateway: {decision.reason}")
         buy_id = broker.place_market_order(buy, "PaperOrderSmokeTest")
@@ -47,7 +47,7 @@ def main() -> None:
             raise SystemExit(f"Buy order {buy_id} ended as {buy_status}; no sell order was sent.")
 
         sell = {"symbol": instrument_id, "action": "SELL", "qty": quantity}
-        decision = risk.evaluate(sell, broker.get_account())
+        decision = risk.evaluate(sell, broker.get_account(), broker.get_portfolio())
         if not decision.approved:
             raise SystemExit(f"Sell rejected by risk gateway: {decision.reason}; close the filled paper position manually.")
         sell_id = broker.place_market_order(sell, "PaperOrderSmokeTest")

@@ -9,6 +9,8 @@
   "max_daily_short_open_notional_base_currency": 20000,
   "min_short_buying_power_buffer_base_currency": 100000,
   "base_currency": "EUR",
+  "leverage_control_enabled": true,
+  "max_gross_leverage": 1.25,
   "allowed_symbols_file": "data/sp500_universe_symbols.txt",
   "allowed_symbols_files": ["data/stoxx_europe_600_approved_symbols.txt"],
   "max_trade_notional_base_currency": 2000,

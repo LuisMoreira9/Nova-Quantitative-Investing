@@ -69,7 +69,7 @@ class RiskGateway:
         self.risk_profile_path = Path(risk_profile_path)
         self.profile = self._load_profile()
 
-    def evaluate(self, signal: dict[str, Any], account: Any) -> RiskDecision:
+    def evaluate(self, signal: dict[str, Any], account: Any, portfolio: list[dict[str, Any]] | None = None) -> RiskDecision:
         """Return an approval decision for one proposed strategy signal.
 
         The executor calls this before order submission. The checks are ordered
@@ -158,6 +158,25 @@ class RiskGateway:
                 trade_notional=trade_notional,
                 latest_price=latest_price,
             )
+
+        if self.profile.get("leverage_control_enabled", False):
+            if portfolio is None:
+                return RiskDecision(False, "portfolio is required while leverage control is enabled")
+            equity = self._account_equity(account)
+            existing_gross = sum(
+                abs(Decimal(str(row.get("quantity", 0))))
+                * Decimal(str(row.get("current_price", 0)))
+                * self._fx_rate_to_base(str(row.get("currency", base_currency)).upper())
+                for row in portfolio
+            )
+            # Closing orders never add leverage. New buys/shorts are reserved at
+            # their conservative reference notional until TWS reports the fill.
+            increases_gross = normalized["action"] == "BUY" and normalized.get("position_effect") != "CLOSE"
+            increases_gross = increases_gross or (normalized["action"] == "SELL" and normalized.get("position_effect") == "OPEN")
+            projected = existing_gross + (trade_notional if increases_gross else Decimal("0"))
+            maximum = equity * Decimal(str(self.profile["max_gross_leverage"]))
+            if projected > maximum:
+                return RiskDecision(False, f"projected gross exposure {projected:.2f} {base_currency} exceeds {self.profile['max_gross_leverage']}x leverage cap", trade_notional=trade_notional, latest_price=latest_price)
 
         return RiskDecision(True, "approved", trade_notional=trade_notional, latest_price=latest_price)
 
@@ -319,3 +338,15 @@ class RiskGateway:
         # Fakes used by unit tests may omit a currency; in that case their
         # buying power is understood to be in the configured base currency.
         return str(raw_currency or self.profile["base_currency"]).upper()
+
+    def _account_equity(self, account: Any) -> Decimal:
+        raw = getattr(account, "equity", None)
+        if raw is None and isinstance(account, dict):
+            raw = account.get("equity")
+        try:
+            equity = Decimal(str(raw))
+        except (InvalidOperation, ValueError) as exc:
+            raise RiskGatewayError("account did not include numeric equity for leverage control") from exc
+        if equity <= 0:
+            raise RiskGatewayError("account equity must be positive for leverage control")
+        return equity

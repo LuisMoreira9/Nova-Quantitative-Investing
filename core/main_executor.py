@@ -145,7 +145,7 @@ def route_signal(signal: dict[str, Any], broker: IBKRClient, risk_gateway: RiskG
                 net_quantity,
             )
             return False
-    decision = risk_gateway.evaluate(signal, broker.get_account())
+    decision = risk_gateway.evaluate(signal, broker.get_account(), broker.get_portfolio())
     if not decision.approved:
         LOGGER.warning("Risk rejected %s: %s", signal, decision.reason)
         return False
