@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from dashboard.portfolio_api import _load_snapshot
+from dashboard.timestamps import ibkr_execution_timestamp
 
 
 def public_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -52,16 +53,16 @@ def public_executions(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
         if execution.get("source") != "Nova ledger" or str(execution.get("status", "")).lower() != "filled":
             continue
         execution_id = str(execution.get("execution_id") or "").strip()
-        executed_at = execution.get("submitted_at")
+        executed_at = ibkr_execution_timestamp(execution.get("submitted_at"))
         quantity = execution.get("filled_quantity", execution.get("quantity"))
         price = execution.get("filled_avg_price")
         side = str(execution.get("side") or "").lower()
-        if not execution_id or not executed_at or quantity is None or price is None or side not in {"buy", "sell", "bot", "sld"}:
+        if not execution_id or executed_at is None or quantity is None or price is None or side not in {"buy", "sell", "bot", "sld"}:
             continue
         rows.append(
             {
                 "id": sha256(execution_id.encode("utf-8")).hexdigest(),
-                "executed_at": executed_at,
+                "executed_at": executed_at.isoformat(),
                 "strategy": str(execution.get("strategy") or "Nova"),
                 "symbol": str(execution.get("symbol") or "").upper(),
                 "exchange": str(execution.get("market") or execution.get("exchange") or ""),

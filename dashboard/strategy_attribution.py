@@ -18,6 +18,7 @@ import pandas as pd
 from core.sp500_yfinance_executor import fetch_closes
 from core.stoxx_europe_600 import approved_universe
 from core.yahoo_price_provider import YahooFxPriceProvider
+from dashboard.timestamps import ibkr_execution_timestamp
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,11 +63,8 @@ def _parse_execution_timestamp(value: object) -> pd.Timestamp:
     text = str(value or "").strip()
     if not text:
         return pd.NaT
-    compact = " ".join(text.split())
-    try:
-        return pd.Timestamp(datetime.strptime(compact, "%Y%m%d %H:%M:%S"), tz="UTC")
-    except ValueError:
-        return pd.to_datetime(text, format="mixed", utc=True, errors="coerce")
+    parsed = ibkr_execution_timestamp(text)
+    return pd.Timestamp(parsed) if parsed is not None else pd.NaT
 
 
 def sync_execution_ledger(executions: list[dict[str, Any]]) -> pd.DataFrame:
