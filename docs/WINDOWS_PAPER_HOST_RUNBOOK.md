@@ -158,3 +158,19 @@ requires the separately reviewed Supabase publisher/client deployment. The
 service-role key belongs **only** in the host's ignored `.env`; it must never be
 placed in website code, Git, logs, or chat. The public website receives only the
 publishable key and reads the latest sanitized snapshot.
+
+## VaR cache, recovery, storage
+
+- Local risk cache: `data/risk.db` (WAL, Git-ignored) holds the yfinance price
+  window, 30-day audit inputs, and pending Supabase publications. Delete it to
+  force a cold-cache refetch (risk shows unavailable until 252 aligned scenarios
+  return); portfolio publication is unaffected.
+- Config (non-secret, see `.env.example`): `NOVA_SUPABASE_PUBLISH_SECONDS=60`,
+  `NOVA_RISK_ENABLED=1` (set `0` to disable risk publication only),
+  `NOVA_BASE_CURRENCY=EUR`. Secrets (`SUPABASE_*`) stay in host `.env` only.
+- Recovery: on Yahoo failure the worker backs off (2/4/8s, 3 attempts) and keeps
+  the last risk state; on Supabase outage observations queue in `data/risk.db`
+  and retry idempotently with original timestamps. Daily risk rows are upserted
+  before any minute-history pruning. Verify with
+  `python -m unittest discover -s tests` and a fresh publisher cycle
+  (`python -m dashboard.supabase_publisher`), never by restarting executors.

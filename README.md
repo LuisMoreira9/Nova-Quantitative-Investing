@@ -194,3 +194,40 @@ Historical snapshot adapters from the research dashboard are deliberately not
 copied here because a snapshot target-weight backtest is not a live IBKR
 strategy. Each live strategy needs its own real-time data, rebalance schedule,
 and paper-trading validation.
+
+## Portfolio VaR reporting (v1)
+
+Reporting-only 1-day 99% historical-simulation VaR over the whole paper account:
+
+- `dashboard/risk/var_calculation.py` is pure (stdlib only): signed MV-EUR/equity
+  weights, `EUR return = (1+local)*(1+FX)-1`, losses sorted ascending,
+  rank `ceil(0.99*N)` (252 scenarios -> third-largest loss),
+  `VaR = max(0, selected)`, plus worst of last 21 scenarios (not VaR).
+- `dashboard/risk/mapping.py` reuses the STOXX registry + US universe with
+  explicit exceptions; never substitutes ADRs; GBp (`.L`) returns are
+  scale-invariant with an explicit 0.01 multiplier for audit.
+- `dashboard/risk/history.py` fetches adjusted daily closes via yfinance (up to
+  2y), excludes the current UTC date, aligns on common consecutive sessions
+  without forward-fill/zero-fill, and refreshes the full window on updates.
+- `dashboard/risk/store.py` uses stdlib SQLite at `data/risk.db` (Git-ignored)
+  for price cache, 30-day audit inputs, and pending Supabase publications.
+- `dashboard/risk/service.py` runs price acquisition in a background worker
+  (bounded retries/backoff, never blocks the 60s publisher or order path),
+  recalculates when inputs change, exposes unavailable (never partial) with
+  stable reason codes, and tracks last-valid estimates.
+- Public payload `schema_version` 3 adds optional `risk` (ready/unavailable/
+  stale, timestamps, 252-sample metadata, VaR EUR + fraction, 21-scenario worst,
+  coverage, reasons, last-valid). Existing fields are retained; broker IDs,
+  contract IDs, credentials, and internal errors are stripped.
+- Supabase `fouueohrhxvkacrnuylx` (eu-west-2, PG17): `portfolio_risk_history`
+  (1/min UTC, 30d) + `portfolio_risk_daily` (per UTC date, indefinite); see
+  `supabase/migrations/20260921_portfolio_risk.sql`. Browser roles SELECT only.
+- Rollback: `NOVA_RISK_ENABLED=0` disables risk publication (portfolio reporting
+  continues, history preserved); website `PUBLIC_RISK_ENABLED=0` hides the section.
+- Tests: `python -m unittest discover -s tests` (76 tests: quantile, exposures,
+  FX, alignment, mapping, publisher sanitising, service orchestration —
+  verified EUR weights, content-hashed dataset versions, history-age stale
+  downgrade, refreshed observation times, freshness-triggered refetch,
+  stage-before-write outage queue with bounded transport-aborting drain,
+  newest-wins daily, cash-only zero vs incomplete collection, SQLite
+  persistence including separate last-valid — execution timestamps).

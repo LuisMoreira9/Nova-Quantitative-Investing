@@ -49,5 +49,10 @@ __pycache__/
 .venv/
 venv/
 
+# VaR risk cache/audit/queue (host-local, may contain position-derived weights).
+/data/risk.db
+/data/risk.db-*
+/data/risk_cache*.json
+
 # macOS metadata files that sometimes appear when the repo is opened on a Mac.
 .DS_Store

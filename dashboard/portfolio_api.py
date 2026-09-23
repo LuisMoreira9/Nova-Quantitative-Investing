@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
 from core.main_executor import load_local_env
 from dashboard.ibkr_account import load_paper_account_data
 from dashboard.portfolio_classification import enrich_positions, exposure_by
+from dashboard.risk.service import get_service
 
 
 LOGGER = logging.getLogger(__name__)
@@ -95,6 +96,29 @@ def _load_snapshot() -> dict[str, Any]:
     # dashboard from TWS (IBKR error 326).
     snapshot = load_paper_account_data(client_id_offset=2)
     positions = enrich_positions(snapshot["positions"])
+    # Whole-account VaR uses native cash + verified valuations before sanitising.
+    # The background price fetch never blocks this snapshot; a cold cache yields
+    # an explicit unavailable risk object and triggers an async refresh.
+    try:
+        risk = get_service().compute_from_snapshot(
+            {
+                "positions": positions.to_dict(orient="records") if hasattr(positions, "to_dict") else positions,
+                "currency_cash": snapshot.get("currency_cash", {}),
+                "account": snapshot.get("account", {}),
+                "base_currency": snapshot.get("base_currency", "EUR"),
+                "loaded_at": snapshot.get("loaded_at"),
+            }
+        )
+    except Exception as exc:
+        LOGGER.warning("Risk calculation failed, exposing unavailable state: %s", exc)
+        risk = {
+            "status": "unavailable",
+            "reasons": ["incomplete_broker_state"],
+            "var_fraction": None,
+            "var_eur": None,
+            "worst_21_fraction": None,
+            "sample_count": 0,
+        }
     return json.loads(
         json.dumps(
             {
@@ -112,6 +136,8 @@ def _load_snapshot() -> dict[str, Any]:
                 # and hosted dashboard use the same display shape.
                 "executions": _records(snapshot["order_history"]),
                 "fx_hedges": _records(snapshot["fx_hedges"]),
+                "currency_cash": snapshot.get("currency_cash", {}),
+                "risk": risk,
             },
             default=_json_value,
         )
