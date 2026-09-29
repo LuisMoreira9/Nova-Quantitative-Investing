@@ -160,25 +160,71 @@ def _parse_gdelt_time(value: Any) -> datetime | None:
     return None
 
 
-def _fetch_text(url: str) -> tuple[str | None, str]:
-    """GET with timeout and byte cap; returns (text, error). Never raises."""
+MAX_BACKOFF_SECONDS = 1800
+
+
+def parse_retry_after(value: Any) -> float | None:
+    """Seconds from a Retry-After header (delay or HTTP date); None if unusable."""
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        moment = parsedate_to_datetime(text)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return max(0.0, (moment - datetime.now(timezone.utc)).total_seconds())
+    except Exception:
+        return None
+
+
+def backoff_delay(consecutive_rate_limits: int, retry_after: float | None) -> float:
+    """429 backoff: honour Retry-After, else exponential from 60s, capped."""
+
+    if retry_after is not None:
+        return min(max(retry_after, 1.0), MAX_BACKOFF_SECONDS)
+    return min(60.0 * (2.0 ** max(0, consecutive_rate_limits - 1)), MAX_BACKOFF_SECONDS)
+
+
+# In-memory per-source backoff (restart resets to immediate; health table
+# keeps the durable consecutive-failure count for operators).
+_backoff_until: dict[str, float] = {}
+_rate_limit_streak: dict[str, int] = {}
+
+
+def _fetch_text(url: str) -> tuple[str | None, str, float | None]:
+    """GET with timeout and byte cap; returns (text, error, retry_after)."""
 
     try:
         request = Request(url, headers={"User-Agent": "NovaQuantClub-terminal-news/1 (+https://novaquantclub.com)"})
         with urlopen(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
             raw = response.read(MAX_BODY_BYTES + 1)
     except HTTPError as exc:
-        return None, f"http {exc.code}"
+        if exc.code == 429:
+            retry_after: float | None = None
+            try:
+                retry_after = parse_retry_after(exc.headers.get("Retry-After"))
+            except Exception:
+                retry_after = None
+            return None, "http 429", retry_after
+        return None, f"http {exc.code}", None
     except URLError as exc:
-        return None, f"unreachable: {exc.reason}"
+        return None, f"unreachable: {exc.reason}", None
     except Exception as exc:
-        return None, f"fetch failed: {exc}"
+        return None, f"fetch failed: {exc}", None
     if len(raw) > MAX_BODY_BYTES:
-        return None, "body exceeds 2 MiB cap"
+        return None, "body exceeds 2 MiB cap", None
     try:
-        return raw.decode("utf-8", "replace"), ""
+        return raw.decode("utf-8", "replace"), "", None
     except Exception as exc:
-        return None, f"decode failed: {exc}"
+        return None, f"decode failed: {exc}", None
 
 
 def _rss_items(body: str, source: dict[str, Any]) -> list[dict[str, Any]]:
@@ -257,22 +303,22 @@ def _gdelt_items(body: str, source: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
-def collect_source(source: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
-    """Fetch and parse one source; returns (items, error). Never raises."""
+def collect_source(source: dict[str, Any]) -> tuple[list[dict[str, Any]], str, float | None, bool]:
+    """Fetch and parse one source; (items, error, retry_after, rate_limited)."""
 
     if not source.get("member_display", False):
-        return [], "display not permitted"
-    text, error = _fetch_text(str(source["url"]))
+        return [], "display not permitted", None, False
+    text, error, retry_after = _fetch_text(str(source["url"]))
     if text is None:
-        return [], error
+        return [], error, retry_after, error == "http 429"
     try:
         if source["kind"] == "gdelt":
-            return _gdelt_items(text, source), ""
+            return _gdelt_items(text, source), "", None, False
         if source["kind"] == "rss":
-            return _rss_items(text, source), ""
+            return _rss_items(text, source), "", None, False
     except ValueError as exc:
-        return [], str(exc)
-    return [], f"unsupported source kind {source.get('kind')}"
+        return [], str(exc), None, False
+    return [], f"unsupported source kind {source.get('kind')}", None, False
 
 
 def match_exposure(headline: str, snippet: str | None) -> tuple[str | None, str, float]:
@@ -396,11 +442,27 @@ def run_cycle(*, publish: bool = True) -> dict[str, int]:
     gross_weights, snapshot_time = current_exposure(base_url, secret)
     for source in SOURCES:
         try:
-            items, error = collect_source(source)
-            status = "ok" if not error else "down"
-            if error:
+            source_id = str(source["id"])
+            wait_until = _backoff_until.get(source_id, 0.0)
+            if now.timestamp() < wait_until:
+                # Rate-limited earlier: skip quietly, keep stored rows serving.
+                continue
+            items, error, retry_after, rate_limited = collect_source(source)
+            if rate_limited:
+                streak = _rate_limit_streak.get(source_id, 0) + 1
+                _rate_limit_streak[source_id] = streak
+                delay = backoff_delay(streak, retry_after)
+                _backoff_until[source_id] = now.timestamp() + delay
+                status, detail = "degraded", f"http 429: backing off {int(delay)}s (streak {streak})"
+                counts["sources_failed"] += 1
+            elif error:
+                _rate_limit_streak.pop(source_id, None)
+                status, detail = "down", error
                 counts["sources_failed"] += 1
             else:
+                _rate_limit_streak.pop(source_id, None)
+                _backoff_until.pop(source_id, None)
+                status, detail = "ok", f"attribution: {source['attribution']}"
                 counts["sources_ok"] += 1
             if publish:
                 try:
@@ -409,7 +471,7 @@ def run_cycle(*, publish: bool = True) -> dict[str, int]:
                         "last_attempt_at": now.isoformat(),
                         "last_success_at": now.isoformat() if not error else None,
                         "status": status,
-                        "detail": error[:1000] if error else f"attribution: {source['attribution']}",
+                        "detail": detail[:1000],
                         "consecutive_failures": 0 if not error else 1,
                         "updated_at": now.isoformat(),
                     }, upsert=True, conflict="source")

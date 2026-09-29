@@ -5,9 +5,11 @@ from datetime import datetime, timezone
 
 from dashboard.terminal_news import (
     SOURCES,
+    backoff_delay,
     canonical_url,
     collect_source,
     match_exposure,
+    parse_retry_after,
     rank_story,
     story_id,
     _gdelt_items,
@@ -45,9 +47,37 @@ class RegistryTest(unittest.TestCase):
             self.assertIn("attribution", source)
 
     def test_fail_closed_without_display_flag(self):
-        items, error = collect_source({"id": "evil", "kind": "rss", "url": "http://example.com"})
+        items, error, retry_after, rate_limited = collect_source(
+            {"id": "evil", "kind": "rss", "url": "http://example.com"})
         self.assertEqual(items, [])
         self.assertTrue(error)
+        self.assertFalse(rate_limited)
+
+
+class BackoffTest(unittest.TestCase):
+    def test_retry_after_seconds(self):
+        self.assertEqual(parse_retry_after("120"), 120.0)
+        self.assertIsNone(parse_retry_after(None))
+        self.assertIsNone(parse_retry_after(""))
+        self.assertIsNone(parse_retry_after("not-a-date-or-number"))
+
+    def test_retry_after_http_date(self):
+        from email.utils import formatdate
+        from time import time
+        future = formatdate(time() + 90, usegmt=True)
+        parsed = parse_retry_after(future)
+        assert parsed is not None
+        self.assertGreater(parsed, 0)
+        self.assertLessEqual(parsed, 90)
+
+    def test_honours_retry_after_with_cap(self):
+        self.assertEqual(backoff_delay(5, 30.0), 30.0)
+        self.assertEqual(backoff_delay(1, 99999.0), 1800)
+
+    def test_exponential_without_header(self):
+        self.assertEqual(backoff_delay(1, None), 60.0)
+        self.assertEqual(backoff_delay(2, None), 120.0)
+        self.assertEqual(backoff_delay(10, None), 1800)
 
 
 class ParsingTest(unittest.TestCase):
