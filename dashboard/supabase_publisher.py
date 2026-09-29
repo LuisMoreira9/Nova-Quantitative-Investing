@@ -95,6 +95,160 @@ def public_executions(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+TERMINAL_METHODOLOGY_VERSION = "terminal-1"
+
+# Fields that must never appear in the public whitelist row. The builder
+# constructs the row key-by-key (rather than filtering), but the test suite
+# asserts this list stays out even if the bundle shape grows.
+TERMINAL_PUBLIC_FORBIDDEN_FIELDS = frozenset({
+    "equity", "cash", "buying_power", "balance", "quantity", "holdings",
+    "positions", "executions", "allocations", "account",
+})
+
+
+def _parse_observation(value: Any) -> Any | None:
+    """Return a timezone-aware UTC datetime for an ISO observation, else None."""
+
+    from datetime import timezone
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        from datetime import datetime
+
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _to_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number
+
+
+def _equity_points(history: Any) -> list[tuple[Any, float]]:
+    """Return sorted (observed_at, equity) points with usable values only."""
+
+    points: list[tuple[Any, float]] = []
+    if not isinstance(history, list):
+        return points
+    for row in history:
+        if not isinstance(row, dict):
+            continue
+        observed = _parse_observation(row.get("timestamp"))
+        equity = _to_float(row.get("equity"))
+        if observed is None or equity is None or equity <= 0:
+            continue
+        points.append((observed, equity))
+    points.sort(key=lambda point: point[0])
+    return points
+
+
+def build_terminal_public_summary(public: dict[str, Any]) -> dict[str, Any] | None:
+    """Build the whitelist-only public row; None when observation is unusable.
+
+    The normalized index is rebased to the first observed snapshot in this
+    feed, not to inception, and is not flow-adjusted. Verified flow-adjusted
+    return is always None until allocation-ledger baselines exist; the row
+    says so in ``coverage_notes`` instead of inventing a return.
+    """
+
+    if not isinstance(public, dict):
+        return None
+    observed = _parse_observation(public.get("loaded_at"))
+    if observed is None:
+        return None
+    account = public.get("account", {}) if isinstance(public.get("account"), dict) else {}
+    equity = _to_float(account.get("equity"))
+    points = _equity_points(public.get("history", []))
+    if equity is None or not points:
+        return {
+            "observed_at": observed.isoformat(),
+            "schema_version": 1,
+            "status": "partial",
+            "methodology_version": TERMINAL_METHODOLOGY_VERSION,
+            "designation": "paper trading",
+            "normalized_index": None,
+            "verified_return_pct": None,
+            "drawdown_pct": None,
+            "coverage_notes": (
+                "Paper trading. Account observation is incomplete: "
+                "public percentages are temporarily unavailable."
+            )[:2000],
+        }
+    baseline_observed, baseline_equity = points[0]
+    normalized_index = equity / baseline_equity * 100.0
+    peak = points[0][1]
+    worst_drawdown = 0.0
+    for _, value in points:
+        if value > peak:
+            peak = value
+        if peak > 0:
+            worst_drawdown = min(worst_drawdown, (value - peak) / peak * 100.0)
+    if equity > peak:
+        peak = equity
+    if peak > 0:
+        worst_drawdown = min(worst_drawdown, (equity - peak) / peak * 100.0)
+    return {
+        "observed_at": observed.isoformat(),
+        "schema_version": 1,
+        "status": "ready",
+        "methodology_version": TERMINAL_METHODOLOGY_VERSION,
+        "designation": "paper trading",
+        "normalized_index": normalized_index,
+        "verified_return_pct": None,
+        "drawdown_pct": worst_drawdown,
+        "coverage_notes": (
+            "Paper trading. Normalized index rebased to the first observed "
+            f"snapshot in this feed ({baseline_observed.isoformat()}); not "
+            "inception and not flow-adjusted. Verified flow-adjusted return "
+            "is unavailable until allocation-ledger baselines exist."
+        )[:2000],
+    }
+
+
+def build_terminal_member_rows(public: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Build (portfolio_latest, performance_daily) member rows, or Nones."""
+
+    if not isinstance(public, dict):
+        return None, None
+    observed = _parse_observation(public.get("loaded_at"))
+    if observed is None:
+        return None, None
+    account = public.get("account", {}) if isinstance(public.get("account"), dict) else {}
+    equity = _to_float(account.get("equity"))
+    summary = build_terminal_public_summary(public)
+    latest = {
+        "observed_at": observed.isoformat(),
+        "schema_version": 1,
+        "status": summary["status"] if summary else "partial",
+        "methodology_version": TERMINAL_METHODOLOGY_VERSION,
+        "bundle": public,
+    }
+    daily = {
+        "scope": "account",
+        "day": observed.date().isoformat(),
+        "observed_at": observed.isoformat(),
+        "status": summary["status"] if summary else "partial",
+        "methodology_version": TERMINAL_METHODOLOGY_VERSION,
+        "metrics": {
+            "normalized_index": summary["normalized_index"] if summary else None,
+            "verified_return_pct": None,
+            "drawdown_pct": summary["drawdown_pct"] if summary else None,
+            "equity": equity,
+        },
+    }
+    return latest, daily
+
+
 def _minute_bucket(observation_time: str | None) -> str | None:
     """Return UTC minute bucket ISO for idempotent 1/min history keys.
 
@@ -267,10 +421,10 @@ def _settings() -> tuple[str, str]:
     return base_url, secret
 
 
-def _write(base_url: str, secret: str, table: str, payload: dict[str, Any] | list[dict[str, Any]], *, upsert: bool = False) -> None:
+def _write(base_url: str, secret: str, table: str, payload: dict[str, Any] | list[dict[str, Any]], *, upsert: bool = False, conflict: str = "id") -> None:
     endpoint = f"{base_url}/rest/v1/{table}"
     if upsert:
-        endpoint += "?on_conflict=id"
+        endpoint += f"?on_conflict={conflict}"
     request = Request(
         endpoint,
         data=json.dumps(payload).encode("utf-8"),
@@ -309,10 +463,24 @@ def publish_snapshot(snapshot: dict[str, Any] | None = None) -> int:
         _queue_rows(minute_row, daily_row)
     except Exception:
         pass
-    _write(base_url, secret, "portfolio_snapshots", {"snapshot": public_snapshot(source)})
+    terminal_public = public_snapshot(source)
+    _write(base_url, secret, "portfolio_snapshots", {"snapshot": terminal_public})
     executions = public_executions(source)
     if executions:
         _write(base_url, secret, "portfolio_trade_executions", executions, upsert=True)
+    # Terminal foundations never block portfolio reporting: failures skip the
+    # cycle only, and the next cycle republishes from the preserved source.
+    try:
+        summary = build_terminal_public_summary(terminal_public)
+        if summary is not None:
+            _write(base_url, secret, "terminal_public_summary", summary)
+        latest, daily = build_terminal_member_rows(terminal_public)
+        if latest is not None:
+            _write(base_url, secret, "terminal_portfolio_latest", latest)
+        if daily is not None:
+            _write(base_url, secret, "terminal_performance_daily", daily, upsert=True, conflict="scope,day")
+    except Exception as exc:
+        print(f"Terminal publish skipped this cycle: {exc}")
     # Risk never blocks portfolio reporting: failures stay queued locally.
     try:
         _flush_queue(base_url, secret)
