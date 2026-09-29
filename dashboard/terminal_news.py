@@ -121,6 +121,11 @@ CATALOGUE: dict[str, dict[str, Any]] = {
             "sector": "crypto", "countries": ("DE",), "themes": ("bitcoin",)},
 }
 
+# Reverse index for stamping mandate-level geography/themes on items.
+INSTRUMENT_INDEX: dict[str, dict[str, Any]] = {
+    entry["instrument_id"]: entry for entry in CATALOGUE.values()
+}
+
 
 def news_enabled() -> bool:
     """Kill switch: NOVA_TERMINAL_NEWS_ENABLED=0 disables every source."""
@@ -489,6 +494,9 @@ def run_cycle(*, publish: bool = True) -> dict[str, int]:
                     counts["ranked"] += 1 if ranking["score"] > 0 else 0
                     continue
                 try:
+                    entry = INSTRUMENT_INDEX.get(ranking["instrument_id"] or "")
+                    countries = list(entry.get("countries", ())) if entry else []
+                    themes = list(entry.get("themes", ())) if entry else []
                     _write(base_url, secret, "terminal_news_items", {
                         "id": story_id(url),
                         "canonical_url": url,
@@ -498,9 +506,11 @@ def run_cycle(*, publish: bool = True) -> dict[str, int]:
                         "source_url": url,
                         "published_at": item["published_at"].isoformat()
                         if isinstance(item.get("published_at"), datetime) else None,
-                        "event_countries": [],
+                        # Mandate-level geography from the catalogue, not the
+                        # event location: the map labels this distinction.
+                        "event_countries": countries,
                         "publisher_country": None,
-                        "themes": [],
+                        "themes": themes,
                         "instruments": [ranking["instrument_id"]] if ranking["instrument_id"] else [],
                         "group_id": None,
                         "embedding_model": None,
