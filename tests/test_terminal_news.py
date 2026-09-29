@@ -13,6 +13,7 @@ from dashboard.terminal_news import (
     match_factor,
     parse_retry_after,
     rank_story,
+    retention_cutoff,
     story_id,
     _gdelt_items,
     _rss_items,
@@ -80,6 +81,20 @@ class BackoffTest(unittest.TestCase):
         self.assertEqual(backoff_delay(1, None), 60.0)
         self.assertEqual(backoff_delay(2, None), 120.0)
         self.assertEqual(backoff_delay(10, None), 1800)
+
+
+class RetentionTest(unittest.TestCase):
+    def test_cutoff_is_url_safe_and_round_trips(self):
+        from urllib.parse import parse_qsl
+
+        now = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
+        cutoff = retention_cutoff(now)
+        self.assertNotIn("+", cutoff)
+        self.assertNotIn(" ", cutoff)
+        key, value = parse_qsl(f"published_at=lt.{cutoff}")[0]
+        self.assertEqual(key, "published_at")
+        self.assertTrue(value.startswith("lt.2026-08-30"))
+        self.assertIn("+00:00", value)
 
 
 class ParsingTest(unittest.TestCase):

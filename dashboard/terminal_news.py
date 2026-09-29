@@ -514,6 +514,15 @@ def current_exposure(base_url: str, secret: str
         return empty
 
 
+def retention_cutoff(now: datetime) -> str:
+    """Percent-encoded ISO cutoff for the retention delete query."""
+
+    from urllib.parse import quote
+
+    return quote(datetime.fromtimestamp(now.timestamp() - RETENTION_DAYS * 86400,
+                                        tz=timezone.utc).isoformat(), safe="")
+
+
 def run_cycle(*, publish: bool = True) -> dict[str, int]:
     """One collection pass; returns counts. Never raises."""
 
@@ -629,10 +638,10 @@ def run_cycle(*, publish: bool = True) -> dict[str, int]:
             counts["sources_failed"] += 1
             print(f"Source {source.get('id')} failed: {exc}")
     if publish:
-        # Bounded retention delete; failures never raise.
+        # Bounded retention delete; failures never raise. The cutoff must be
+        # percent-encoded: a raw +00:00 offset decodes as a space (HTTP 400).
         try:
-            cutoff = datetime.fromtimestamp(now.timestamp() - RETENTION_DAYS * 86400,
-                                            tz=timezone.utc).isoformat()
+            cutoff = retention_cutoff(now)
             request = Request(
                 f"{base_url}/rest/v1/terminal_news_items?published_at=lt.{cutoff}&select=id",
                 method="DELETE", headers={"apikey": secret, "Authorization": f"Bearer {secret}"})
