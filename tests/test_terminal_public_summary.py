@@ -37,6 +37,7 @@ class TerminalPublicSummaryTest(unittest.TestCase):
         for forbidden in TERMINAL_PUBLIC_FORBIDDEN_FIELDS:
             self.assertNotIn(forbidden, row)
         self.assertIn("not flow-adjusted", row["coverage_notes"])
+        self.assertIn("unadjusted for funding", row["coverage_notes"])
 
     def test_drawdown_reports_peak_to_trough(self):
         public = _public(history=[

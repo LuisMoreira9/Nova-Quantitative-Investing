@@ -209,7 +209,8 @@ def build_terminal_public_summary(public: dict[str, Any]) -> dict[str, Any] | No
         "coverage_notes": (
             "Paper trading. Normalized index rebased to the first observed "
             f"snapshot in this feed ({baseline_observed.isoformat()}); not "
-            "inception and not flow-adjusted. Verified flow-adjusted return "
+            "inception and not flow-adjusted. Drawdown is equity-observation "
+            "drawdown, unadjusted for funding. Verified flow-adjusted return "
             "is unavailable until allocation-ledger baselines exist."
         )[:2000],
     }
