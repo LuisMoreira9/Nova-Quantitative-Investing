@@ -33,7 +33,17 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 
-RANKING_VERSION = "terminal-rank-2-rules"
+RANKING_VERSION = "terminal-rank-3-rules"
+
+# Broad-macro keywords: central-bank and rates announcements move the whole
+# book, not a slice. They earn a capped share (never slice attribution) so
+# official sources stay visible in Ranked instead of vanishing.
+MACRO_KEYWORDS: tuple[str, ...] = (
+    "federal reserve", "fomc", "european central bank", "central bank",
+    "interest rate", "interest rates", "treasury yield", "bond yield",
+    "inflation", "monetary policy",
+)
+MACRO_SHARE_CAP = 0.30
 EXPOSURE_CATALOGUE_VERSION = "terminal-exposure-1"
 FETCH_TIMEOUT_SECONDS = 15
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -416,10 +426,13 @@ def rank_story(item: dict[str, Any], gross_weights: dict[str, float],
     exposure_match = gross_weights.get(instrument_id, 0.0) if instrument_id and kind == "direct" else 0.0
     direct_match = 1.0 if kind == "direct" else 0.0
     factor_label = ""
+    macro_hit = False
     if exposure_match <= 0 and direct_match <= 0:
         share, factor_kind, factor_label = match_factor(haystack, countries, sectors, regions)
         if share > 0:
             exposure_match, kind = share * 0.6, factor_kind
+        elif any(_mentions(haystack, phrase) for phrase in MACRO_KEYWORDS):
+            exposure_match, kind, macro_hit = MACRO_SHARE_CAP, "mapped", True
     published = item.get("published_at")
     if isinstance(published, datetime):
         age_hours = max(0.0, (now - published).total_seconds() / 3600.0)
@@ -442,6 +455,9 @@ def rank_story(item: dict[str, Any], gross_weights: dict[str, float],
     score = max(0.0, min(100.0, score))
     if kind == "direct":
         explanation = "Direct mention of a held instrument."
+    elif macro_hit:
+        explanation = ("Official rates/macro announcement; broad-market "
+                       "connection, capped with no slice attribution.")
     elif factor_label:
         explanation = (f"Connected through verified {factor_label} exposure "
                        f"({exposure_match / 0.6:.0%} of gross).")

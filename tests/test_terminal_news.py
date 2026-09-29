@@ -184,6 +184,19 @@ class RankingTest(unittest.TestCase):
         self.assertEqual((share, kind, label), (0.20, "mapped", "europe ex uk"))
         self.assertEqual(match_factor("US stocks climb", {}, {}, {"us": 0.50}), (0.0, "none", ""))
 
+    def test_macro_announcement_scores_capped(self):
+        item = {"headline": "Federal Reserve holds interest rates steady", "snippet": None,
+                "published_at": datetime(2026, 9, 29, 8, 0, tzinfo=timezone.utc)}
+        ranking = rank_story(item, {"ASML": 0.05}, {}, {}, {}, None, _now(), 1.0)
+        self.assertGreater(ranking["score"], 0)
+        self.assertEqual(ranking["mapping_kind"], "mapped")
+        self.assertIn("broad-market", ranking["explanation"])
+        direct = rank_story(
+            {"headline": "ASML beats expectations", "snippet": None,
+             "published_at": datetime(2026, 9, 29, 8, 0, tzinfo=timezone.utc)},
+            {"ASML": 0.05}, {}, {}, {}, None, _now(), 1.0)
+        self.assertGreater(direct["score"], ranking["score"])
+
     def test_unconnected_story_scores_zero(self):
         item = {"headline": "Local bakery wins prize", "snippet": None,
                 "published_at": datetime(2026, 9, 29, 8, 0, tzinfo=timezone.utc)}
