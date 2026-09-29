@@ -2,6 +2,7 @@
 
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
 from dashboard.terminal_news import (
     SOURCES,
@@ -181,6 +182,41 @@ class RankingTest(unittest.TestCase):
         ranking = rank_story(item, {"US.SPY": 0.14}, {}, {}, {}, None, _now(), 0.8)
         self.assertEqual(ranking["score"], 0.0)
         self.assertEqual(ranking["instrument_id"], "US.GLD")
+
+
+class PublishingTest(unittest.TestCase):
+    def test_multiple_items_keep_exposure_factors_after_geography_stamp(self):
+        from dashboard.terminal_news import run_cycle
+
+        published = datetime.now(timezone.utc)
+        items = [
+            {"headline": "SPY closes at a record", "snippet": None,
+             "url": "https://example.com/spy", "publisher": "Test",
+             "published_at": published},
+            {"headline": "Technology shares lead the rally", "snippet": None,
+             "url": "https://example.com/technology", "publisher": "Test",
+             "published_at": published},
+        ]
+        source = {"id": "test-feed", "quality": 0.8, "attribution": "Test"}
+        with patch("dashboard.terminal_news.news_enabled", return_value=True), \
+             patch("dashboard.terminal_news.SOURCES", [source]), \
+             patch("dashboard.terminal_news.collect_source",
+                   return_value=(items, None, None, False)), \
+             patch("dashboard.terminal_news.current_exposure",
+                   return_value=({"US.SPY": 0.14}, {}, {"technology": 0.40}, {}, published)), \
+             patch("dashboard.supabase_publisher._settings",
+                   return_value=("https://example.com", "test-secret")), \
+             patch("dashboard.supabase_publisher._write") as write, \
+             patch("dashboard.terminal_news.urlopen", return_value=MagicMock()):
+            counts = run_cycle(publish=True)
+
+        self.assertEqual(counts, {"items": 2, "ranked": 2,
+                                  "sources_ok": 1, "sources_failed": 0})
+        writes = [(call.args[2], call.args[3]) for call in write.call_args_list]
+        self.assertEqual(sum(table == "terminal_news_relevance" for table, _ in writes), 2)
+        stamped = [row for table, row in writes if table == "terminal_news_items"]
+        self.assertEqual(len(stamped), 2)
+        self.assertEqual(stamped[0]["event_countries"], ["US"])
 
 
 if __name__ == "__main__":

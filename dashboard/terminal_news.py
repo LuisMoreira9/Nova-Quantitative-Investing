@@ -581,7 +581,7 @@ def run_cycle(*, publish: bool = True) -> dict[str, int]:
                     continue
                 try:
                     entry = INSTRUMENT_INDEX.get(ranking["instrument_id"] or "")
-                    countries = list(entry.get("countries", ())) if entry else []
+                    mandate_countries = list(entry.get("countries", ())) if entry else []
                     themes = list(entry.get("themes", ())) if entry else []
                     _write(base_url, secret, "terminal_news_items", {
                         "id": story_id(url),
@@ -594,7 +594,7 @@ def run_cycle(*, publish: bool = True) -> dict[str, int]:
                         if isinstance(item.get("published_at"), datetime) else None,
                         # Mandate-level geography from the catalogue, not the
                         # event location: the map labels this distinction.
-                        "event_countries": countries,
+                        "event_countries": mandate_countries,
                         "publisher_country": None,
                         "themes": themes,
                         "instruments": [ranking["instrument_id"]] if ranking["instrument_id"] else [],
