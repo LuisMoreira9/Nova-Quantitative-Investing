@@ -67,7 +67,7 @@ SOURCES: tuple[dict[str, Any], ...] = (
     {
         "id": "ecb-press",
         "kind": "rss",
-        "url": "https://www.ecb.europa.eu/press/rss/press.rss",
+        "url": "https://www.ecb.europa.eu/rss/press.html",
         "attribution": "European Central Bank",
         "quality": 1.0,
         "member_display": True,
