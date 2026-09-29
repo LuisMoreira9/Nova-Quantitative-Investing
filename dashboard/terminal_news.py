@@ -33,7 +33,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 
-RANKING_VERSION = "terminal-rank-1-rules"
+RANKING_VERSION = "terminal-rank-2-rules"
 EXPOSURE_CATALOGUE_VERSION = "terminal-exposure-1"
 FETCH_TIMEOUT_SECONDS = 15
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -125,6 +125,45 @@ CATALOGUE: dict[str, dict[str, Any]] = {
 INSTRUMENT_INDEX: dict[str, dict[str, Any]] = {
     entry["instrument_id"]: entry for entry in CATALOGUE.values()
 }
+
+# Region labels from the club's investable-region convention to matchable
+# phrases. Two-letter codes never match raw text (too ambiguous); only the
+# phrases below count, and every hit is labeled 'mapped', never 'direct'.
+REGION_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "us": ("united states", "u.s.", "wall street"),
+    "europe ex uk": ("europe", "european"),
+    "uk": ("britain", "united kingdom", "london", "ftse"),
+    "eu": ("euro area", "eurozone"),
+    "asia": ("asia", "asian"),
+    "japan": ("japan", "japanese", "nikkei"),
+    "china": ("china", "chinese"),
+}
+
+
+def _mentions(haystack: str, phrase: str) -> bool:
+    return re.search(rf"(?i)(?<![A-Za-z]){re.escape(phrase)}(?![A-Za-z])", haystack) is not None
+
+
+def match_factor(haystack: str, countries: dict[str, float],
+                 sectors: dict[str, float], regions: dict[str, float]
+                 ) -> tuple[float, str, str]:
+    """Strongest verified sector/country/region hit: (share, kind, label)."""
+
+    best = (0.0, "none", "")
+    for country, share in countries.items():
+        if share > best[0] and _mentions(haystack, country):
+            best = (share, "mapped", country)
+    for sector, share in sectors.items():
+        if share > best[0] and _mentions(haystack, sector):
+            best = (share, "mapped", sector)
+    for region, share in regions.items():
+        if share <= best[0]:
+            continue
+        for phrase in REGION_KEYWORDS.get(region, ()):
+            if _mentions(haystack, phrase):
+                best = (share, "mapped", region)
+                break
+    return best
 
 
 def news_enabled() -> bool:
@@ -343,17 +382,44 @@ def match_exposure(headline: str, snippet: str | None) -> tuple[str | None, str,
 
 
 def rank_story(item: dict[str, Any], gross_weights: dict[str, float],
+               countries: dict[str, float], sectors: dict[str, float],
+               regions: dict[str, float],
                snapshot_time: datetime | None, now: datetime,
                source_quality: float) -> dict[str, Any]:
-    """Score portfolio relevance 0-100 with evidence; zero when unconnected."""
+    """Score portfolio relevance 0-100 with evidence; zero when unconnected.
 
-    instrument_id, kind, strength = match_exposure(item["headline"], item.get("snippet"))
-    if kind == "direct" and instrument_id and instrument_id not in gross_weights:
-        # Watched but not held: kept as a mandate-level candidate for the
-        # instrument filter, but it earns no relevance score without exposure.
-        kind = "mapped"
+    Tier 1 is a direct whole-word mention of a held listing symbol or a
+    catalogue alias (strength 1.0). Tier 2 is a verified sector, country or
+    region mention weighted by its gross-exposure share (strength 0.6): the
+    strongest applicable match wins, overlapping matches never sum.
+    """
+
+    headline = item["headline"]
+    snippet = item.get("snippet")
+    haystack = f"{headline}\n{snippet or ''}"
+    instrument_id, kind, strength = match_exposure(headline, snippet)
+    if (kind != "direct" or (instrument_id and instrument_id not in gross_weights)):
+        # Held listing symbols are authoritative even when absent from the
+        # catalogue. Symbols shorter than three characters are skipped: they
+        # need ticker disambiguation before they can count as evidence.
+        direct_symbol = next(
+            (symbol for symbol in gross_weights
+             if len(symbol) >= 3 and _mentions(haystack, symbol)),
+            None,
+        )
+        if direct_symbol is not None:
+            instrument_id, kind, strength = direct_symbol, "direct", 1.0
+        elif kind == "direct" and instrument_id:
+            # Watched but not held: kept as a mandate-level candidate for the
+            # instrument filter, but it earns no relevance score without exposure.
+            kind = "mapped"
     exposure_match = gross_weights.get(instrument_id, 0.0) if instrument_id and kind == "direct" else 0.0
     direct_match = 1.0 if kind == "direct" else 0.0
+    factor_label = ""
+    if exposure_match <= 0 and direct_match <= 0:
+        share, factor_kind, factor_label = match_factor(haystack, countries, sectors, regions)
+        if share > 0:
+            exposure_match, kind = share * 0.6, factor_kind
     published = item.get("published_at")
     if isinstance(published, datetime):
         age_hours = max(0.0, (now - published).total_seconds() / 3600.0)
@@ -376,6 +442,9 @@ def rank_story(item: dict[str, Any], gross_weights: dict[str, float],
     score = max(0.0, min(100.0, score))
     if kind == "direct":
         explanation = "Direct mention of a held instrument."
+    elif factor_label:
+        explanation = (f"Connected through verified {factor_label} exposure "
+                       f"({exposure_match / 0.6:.0%} of gross).")
     else:
         explanation = "Connected through the instrument watchlist; no holding."
     if snapshot_time is not None:
@@ -395,24 +464,37 @@ def _service_get(base_url: str, secret: str, path: str) -> Any:
         return json.loads(response.read().decode("utf-8"))
 
 
-def current_exposure(base_url: str, secret: str) -> tuple[dict[str, float], datetime | None]:
-    """Gross-exposure weights by instrument from the latest member bundle."""
+def current_exposure(base_url: str, secret: str
+                    ) -> tuple[dict[str, float], dict[str, float], dict[str, float],
+                               dict[str, float], datetime | None]:
+    """Exposure shares by symbol, country, sector and region (lowercased)."""
 
+    empty: tuple[dict[str, float], dict[str, float], dict[str, float], dict[str, float], None] = \
+        ({}, {}, {}, {}, None)
     try:
         rows = _service_get(base_url, secret,
                             "terminal_portfolio_latest?select=bundle,observed_at&order=published_at.desc&limit=1")
     except Exception:
-        return {}, None
+        return empty
     if not rows:
-        return {}, None
+        return empty
     try:
         bundle = rows[0].get("bundle", {})
         positions = bundle.get("positions", [])
         total = sum(max(0.0, float(p.get("native_market_value_base") or p.get("market_value") or 0))
                     for p in positions if isinstance(p, dict))
         if total <= 0:
-            return {}, None
+            return empty
         weights: dict[str, float] = {}
+        countries: dict[str, float] = {}
+        sectors: dict[str, float] = {}
+        regions: dict[str, float] = {}
+
+        def add(mapping: dict[str, float], label: Any, value: float) -> None:
+            name = str(label or "").strip().lower()
+            if name and name != "unclassified" and value > 0:
+                mapping[name] = mapping.get(name, 0.0) + value / total
+
         for position in positions:
             if not isinstance(position, dict):
                 continue
@@ -421,12 +503,15 @@ def current_exposure(base_url: str, secret: str) -> tuple[dict[str, float], date
                                    or position.get("market_value") or 0))
             if symbol and value > 0:
                 weights[symbol] = weights.get(symbol, 0.0) + value / total
+            add(countries, position.get("country"), value)
+            add(sectors, position.get("sector"), value)
+            add(regions, position.get("region"), value)
         observed = rows[0].get("observed_at")
         snapshot_time = datetime.fromisoformat(str(observed).replace("Z", "+00:00")) \
             if observed else None
-        return weights, snapshot_time
+        return weights, countries, sectors, regions, snapshot_time
     except Exception:
-        return {}, None
+        return empty
 
 
 def run_cycle(*, publish: bool = True) -> dict[str, int]:
@@ -444,7 +529,7 @@ def run_cycle(*, publish: bool = True) -> dict[str, int]:
         return counts
     now = datetime.now(timezone.utc)
     # Exposure keyed by listing symbol; catalogue maps aliases to these keys.
-    gross_weights, snapshot_time = current_exposure(base_url, secret)
+    gross_weights, countries, sectors, regions, snapshot_time = current_exposure(base_url, secret)
     for source in SOURCES:
         try:
             source_id = str(source["id"])
@@ -488,7 +573,8 @@ def run_cycle(*, publish: bool = True) -> dict[str, int]:
                 url = canonical_url(item["url"])
                 if not url:
                     continue
-                ranking = rank_story(item, gross_weights, snapshot_time, now, float(source["quality"]))
+                ranking = rank_story(item, gross_weights, countries, sectors, regions,
+                                   snapshot_time, now, float(source["quality"]))
                 if not publish:
                     counts["items"] += 1
                     counts["ranked"] += 1 if ranking["score"] > 0 else 0

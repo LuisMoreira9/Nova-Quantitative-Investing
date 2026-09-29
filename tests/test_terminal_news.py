@@ -9,6 +9,7 @@ from dashboard.terminal_news import (
     canonical_url,
     collect_source,
     match_exposure,
+    match_factor,
     parse_retry_after,
     rank_story,
     story_id,
@@ -119,7 +120,7 @@ class RankingTest(unittest.TestCase):
     def test_held_instrument_scores_with_evidence(self):
         item = {"headline": "SPY closes at a record", "snippet": None,
                 "published_at": datetime(2026, 9, 29, 8, 0, tzinfo=timezone.utc)}
-        ranking = rank_story(item, {"US.SPY": 0.14},
+        ranking = rank_story(item, {"US.SPY": 0.14}, {}, {}, {},
                              datetime(2026, 9, 29, 8, 30, tzinfo=timezone.utc),
                              _now(), 0.8)
         self.assertGreater(ranking["score"], 0)
@@ -127,17 +128,57 @@ class RankingTest(unittest.TestCase):
         self.assertEqual(ranking["mapping_kind"], "direct")
         self.assertIn("held instrument", ranking["explanation"])
 
+    def test_held_listing_symbol_scores_direct(self):
+        item = {"headline": "ASML beats expectations", "snippet": None,
+                "published_at": datetime(2026, 9, 29, 8, 0, tzinfo=timezone.utc)}
+        ranking = rank_story(item, {"ASML": 0.05}, {}, {}, {}, None, _now(), 0.8)
+        self.assertGreater(ranking["score"], 0)
+        self.assertEqual(ranking["mapping_kind"], "direct")
+        self.assertEqual(ranking["instrument_id"], "ASML")
+
+    def test_short_symbols_need_disambiguation(self):
+        item = {"headline": "C the light", "snippet": None,
+                "published_at": datetime(2026, 9, 29, 8, 0, tzinfo=timezone.utc)}
+        ranking = rank_story(item, {"C": 0.05}, {}, {}, {}, None, _now(), 0.8)
+        self.assertEqual(ranking["score"], 0.0)
+
+    def test_sector_hit_scores_mapped_with_share(self):
+        item = {"headline": "Technology shares lead the rally", "snippet": None,
+                "published_at": datetime(2026, 9, 29, 8, 0, tzinfo=timezone.utc)}
+        ranking = rank_story(item, {"ASML": 0.05}, {}, {"technology": 0.40}, {}, None, _now(), 0.8)
+        self.assertGreater(ranking["score"], 0)
+        self.assertEqual(ranking["mapping_kind"], "mapped")
+        self.assertIn("technology", ranking["explanation"])
+
+    def test_country_hit_scores_mapped(self):
+        item = {"headline": "Netherlands unveils chip fund", "snippet": None,
+                "published_at": datetime(2026, 9, 29, 8, 0, tzinfo=timezone.utc)}
+        ranking = rank_story(item, {"ASML": 0.05}, {"netherlands": 0.06}, {}, {}, None, _now(), 0.8)
+        self.assertGreater(ranking["score"], 0)
+        self.assertEqual(ranking["mapping_kind"], "mapped")
+
+    def test_strongest_factor_wins(self):
+        share, kind, label = match_factor(
+            "Technology shares lead as the Netherlands unveils a fund",
+            {"netherlands": 0.06}, {"technology": 0.40}, {})
+        self.assertEqual((share, kind, label), (0.40, "mapped", "technology"))
+
+    def test_region_phrases_match_without_bare_codes(self):
+        share, kind, label = match_factor("European stocks climb", {}, {}, {"europe ex uk": 0.20})
+        self.assertEqual((share, kind, label), (0.20, "mapped", "europe ex uk"))
+        self.assertEqual(match_factor("US stocks climb", {}, {}, {"us": 0.50}), (0.0, "none", ""))
+
     def test_unconnected_story_scores_zero(self):
         item = {"headline": "Local bakery wins prize", "snippet": None,
                 "published_at": datetime(2026, 9, 29, 8, 0, tzinfo=timezone.utc)}
-        ranking = rank_story(item, {"US.SPY": 0.14}, None, _now(), 0.8)
+        ranking = rank_story(item, {"US.SPY": 0.14}, {}, {}, {}, None, _now(), 0.8)
         self.assertEqual(ranking["score"], 0.0)
         self.assertEqual(ranking["mapping_kind"], "none")
 
     def test_watched_but_unheld_earns_no_score(self):
         item = {"headline": "Gold steadies as yields fall", "snippet": None,
                 "published_at": datetime(2026, 9, 29, 8, 0, tzinfo=timezone.utc)}
-        ranking = rank_story(item, {"US.SPY": 0.14}, None, _now(), 0.8)
+        ranking = rank_story(item, {"US.SPY": 0.14}, {}, {}, {}, None, _now(), 0.8)
         self.assertEqual(ranking["score"], 0.0)
         self.assertEqual(ranking["instrument_id"], "US.GLD")
 
