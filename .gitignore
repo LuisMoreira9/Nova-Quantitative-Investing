@@ -4,6 +4,8 @@
 
 # Runtime output, including timestamped launches and recovery attempts.
 /data/*.log
+/data/reporting-*.log.*
+/data/.reporting-*.lock
 
 # Local diagnostic snapshots and reports (may contain account details).
 /data/portfolio_api_check.json

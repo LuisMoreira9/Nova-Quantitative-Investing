@@ -490,7 +490,7 @@ def publish_snapshot(snapshot: dict[str, Any] | None = None) -> int:
     return len(executions)
 
 
-def main() -> None:
+def _run() -> None:
     parser = argparse.ArgumentParser(description="Publish Nova paper data to Supabase.")
     parser.add_argument("--watch", action="store_true", help="Keep publishing at the configured interval.")
     args = parser.parse_args()
@@ -515,6 +515,15 @@ def main() -> None:
         if not args.watch:
             return
         sleep(interval)
+
+
+def main() -> None:
+    from dashboard.reporting_service import ReporterAlreadyRunning, reporter_instance
+    try:
+        with reporter_instance("portfolio"):
+            _run()
+    except ReporterAlreadyRunning as exc:
+        print(exc)
 
 
 if __name__ == "__main__":

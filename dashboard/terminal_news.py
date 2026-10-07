@@ -668,7 +668,7 @@ def run_cycle(*, publish: bool = True) -> dict[str, int]:
     return counts
 
 
-def main() -> None:
+def _run() -> None:
     parser = argparse.ArgumentParser(description="Collect terminal news from approved feeds.")
     parser.add_argument("--watch", action="store_true", help="Keep collecting at the configured interval.")
     parser.add_argument("--once", action="store_true", help="Single collection pass (dry run without --publish).")
@@ -694,6 +694,15 @@ def main() -> None:
         if not args.watch:
             return
         sleep(interval)
+
+
+def main() -> None:
+    from dashboard.reporting_service import ReporterAlreadyRunning, reporter_instance
+    try:
+        with reporter_instance("news"):
+            _run()
+    except ReporterAlreadyRunning as exc:
+        print(exc)
 
 
 if __name__ == "__main__":
