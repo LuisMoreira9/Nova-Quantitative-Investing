@@ -417,6 +417,12 @@ def rank_story(item: dict[str, Any], gross_weights: dict[str, float],
     snippet = item.get("snippet")
     haystack = f"{headline}\n{snippet or ''}"
     instrument_id, kind, strength = match_exposure(headline, snippet)
+    if instrument_id and instrument_id not in gross_weights:
+        # Portfolio positions use listing keys (SPY); aliases use stable
+        # catalogue identities (US.SPY). Resolve held aliases before ranking.
+        instrument_id = next((symbol for symbol, entry in CATALOGUE.items()
+                              if entry["instrument_id"] == instrument_id
+                              and symbol in gross_weights), instrument_id)
     if (kind != "direct" or (instrument_id and instrument_id not in gross_weights)):
         # Held listing symbols are authoritative even when absent from the
         # catalogue. Symbols shorter than three characters are skipped: they
@@ -435,7 +441,8 @@ def rank_story(item: dict[str, Any], gross_weights: dict[str, float],
     exposure_match = gross_weights.get(instrument_id, 0.0) if instrument_id and kind == "direct" else 0.0
     direct_match = 1.0 if kind == "direct" else 0.0
     factor_label = ""
-    macro_topic = any(_mentions(haystack, phrase) for phrase in MACRO_KEYWORDS)
+    policy_text = re.sub(r"(?i)in addition to (?:the )?decisions setting interest rates", "", haystack)
+    macro_topic = any(_mentions(policy_text, phrase) for phrase in MACRO_KEYWORDS)
     macro_hit = False
     if exposure_match <= 0 and direct_match <= 0:
         # Institution names establish provenance, not regional exposure.

@@ -313,6 +313,18 @@ class PolicyRelevanceTest(unittest.TestCase):
         self.assertGreater(ranking["score"], 0)
         self.assertEqual(mandate_geography(ranking, "gdelt-markets")[0], ["US"])
 
+    def test_held_catalogue_alias_uses_listing_exposure(self):
+        ranking = self.rank("S&P 500 climbs", {"SPY": 1.0})
+        self.assertEqual(ranking["mapping_kind"], "direct")
+        self.assertEqual(ranking["exposure_match"], 1.0)
+        self.assertEqual(mandate_geography(ranking, "gdelt-markets")[0], ["US"])
+
+    def test_ecb_non_rate_decision_disclaimer_is_not_a_rate_signal(self):
+        ranking = self.rank("Decisions taken by the Governing Council of the ECB "
+                            "(in addition to decisions setting interest rates)")
+        self.assertEqual(ranking["score"], 0)
+        self.assertFalse(ranking["macro_topic"])
+
 
 class GrossExposureTest(unittest.TestCase):
     def test_shorts_zero_and_invalid_values(self):
