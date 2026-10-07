@@ -12,7 +12,7 @@ Full article bodies are never retrieved or stored.
 
 Semantic grouping and controlled-theme matching arrive with the local
 embedding host (desktop); until then every row is rules-only
-(``ranking_version == terminal-rank-1-rules``) and the map/list UI stays
+(``ranking_version`` identifies the rules revision) and the map/list UI stays
 useful without it.
 """
 
@@ -33,17 +33,26 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 
-RANKING_VERSION = "terminal-rank-3-rules"
+RANKING_VERSION = "terminal-rank-4-rules"
 
-# Broad-macro keywords: central-bank and rates announcements move the whole
-# book, not a slice. They earn a capped share (never slice attribution) so
-# official sources stay visible in Ranked instead of vanishing.
+# Actual policy/rates topics, not the publisher name: routine approvals and
+# enforcement notices do not establish a broad-market portfolio connection.
 MACRO_KEYWORDS: tuple[str, ...] = (
-    "federal reserve", "fomc", "european central bank", "central bank",
+    "fomc", "policy rate", "rate decision", "economic projections",
+    "quantitative easing", "quantitative tightening",
     "interest rate", "interest rates", "treasury yield", "bond yield",
     "inflation", "monetary policy",
 )
 MACRO_SHARE_CAP = 0.30
+# Policy mandate, never article event location. Reviewed 2026-10-07:
+# https://www.ecb.europa.eu/euro/intro/html/index.en.html (BG joined Jan 2026)
+# https://www.federalreserve.gov/monetarypolicy/principles-for-the-conduct-of-monetary-policy.htm
+POLICY_COUNTRIES = {
+    "fed-press": ("US",),
+    "ecb-press": ("AT", "BE", "BG", "HR", "CY", "EE", "FI", "FR", "DE",
+                  "GR", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PT",
+                  "SK", "SI", "ES"),
+}
 EXPOSURE_CATALOGUE_VERSION = "terminal-exposure-1"
 FETCH_TIMEOUT_SECONDS = 15
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -426,12 +435,15 @@ def rank_story(item: dict[str, Any], gross_weights: dict[str, float],
     exposure_match = gross_weights.get(instrument_id, 0.0) if instrument_id and kind == "direct" else 0.0
     direct_match = 1.0 if kind == "direct" else 0.0
     factor_label = ""
+    macro_topic = any(_mentions(haystack, phrase) for phrase in MACRO_KEYWORDS)
     macro_hit = False
     if exposure_match <= 0 and direct_match <= 0:
-        share, factor_kind, factor_label = match_factor(haystack, countries, sectors, regions)
+        # Institution names establish provenance, not regional exposure.
+        factor_text = re.sub(r"(?i)\b(?:European Central Bank|Federal Reserve)\b", "", haystack)
+        share, factor_kind, factor_label = match_factor(factor_text, countries, sectors, regions)
         if share > 0:
             exposure_match, kind = share * 0.6, factor_kind
-        elif any(_mentions(haystack, phrase) for phrase in MACRO_KEYWORDS):
+        elif macro_topic and any(weight > 0 for weight in gross_weights.values()):
             exposure_match, kind, macro_hit = MACRO_SHARE_CAP, "mapped", True
     published = item.get("published_at")
     if isinstance(published, datetime):
@@ -449,14 +461,15 @@ def rank_story(item: dict[str, Any], gross_weights: dict[str, float],
         return {"score": 0.0, "exposure_match": 0.0, "direct_match": 0.0,
                 "strategy_match": 0.0, "freshness": round(freshness, 4),
                 "evidence_quality": round(evidence_quality, 4), "mapping_kind": "none" if kind == "none" else kind,
-                "explanation": explanation, "instrument_id": instrument_id}
+                "explanation": explanation, "instrument_id": instrument_id,
+                "macro_topic": macro_topic}
     score = 100.0 * evidence_quality * (
         0.50 * exposure_match + 0.25 * direct_match + 0.15 * 0.0 + 0.10 * freshness)
     score = max(0.0, min(100.0, score))
     if kind == "direct":
         explanation = "Direct mention of a held instrument."
     elif macro_hit:
-        explanation = ("Official rates/macro announcement; broad-market "
+        explanation = ("Rates/macro topic; broad-market "
                        "connection, capped with no slice attribution.")
     elif factor_label:
         explanation = (f"Connected through verified {factor_label} exposure "
@@ -470,7 +483,21 @@ def rank_story(item: dict[str, Any], gross_weights: dict[str, float],
     return {"score": round(score, 2), "exposure_match": round(exposure_match, 4),
             "direct_match": direct_match, "strategy_match": 0.0,
             "freshness": round(freshness, 4), "evidence_quality": round(evidence_quality, 4),
-            "mapping_kind": kind, "explanation": explanation[:1000], "instrument_id": instrument_id}
+            "mapping_kind": kind, "explanation": explanation[:1000],
+            "instrument_id": instrument_id, "macro_topic": macro_topic}
+
+
+def mandate_geography(ranking: dict[str, Any], source_id: str
+                      ) -> tuple[list[str], list[str]]:
+    """Catalogue or official policy mandate; no publisher-HQ inference."""
+
+    instrument = ranking.get("instrument_id") or ""
+    entry = INSTRUMENT_INDEX.get(instrument) or CATALOGUE.get(instrument)
+    if entry:
+        return list(entry.get("countries", ())), list(entry.get("themes", ()))
+    if ranking.get("macro_topic") and source_id in POLICY_COUNTRIES:
+        return list(POLICY_COUNTRIES[source_id]), ["rates", "geo:central-bank-mandate"]
+    return [], []
 
 
 def _service_get(base_url: str, secret: str, path: str) -> Any:
@@ -497,8 +524,17 @@ def current_exposure(base_url: str, secret: str
     try:
         bundle = rows[0].get("bundle", {})
         positions = bundle.get("positions", [])
-        total = sum(max(0.0, float(p.get("native_market_value_base") or p.get("market_value") or 0))
-                    for p in positions if isinstance(p, dict))
+        def gross_value(position: dict[str, Any]) -> float:
+            raw = position.get("native_market_value_base")
+            if raw is None:
+                raw = position.get("market_value")
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return 0.0
+            return abs(value) if math.isfinite(value) else 0.0
+
+        total = sum(gross_value(p) for p in positions if isinstance(p, dict))
         if total <= 0:
             return empty
         weights: dict[str, float] = {}
@@ -515,8 +551,7 @@ def current_exposure(base_url: str, secret: str
             if not isinstance(position, dict):
                 continue
             symbol = str(position.get("symbol") or "").upper()
-            value = max(0.0, float(position.get("native_market_value_base")
-                                   or position.get("market_value") or 0))
+            value = gross_value(position)
             if symbol and value > 0:
                 weights[symbol] = weights.get(symbol, 0.0) + value / total
             add(countries, position.get("country"), value)
@@ -605,9 +640,7 @@ def run_cycle(*, publish: bool = True) -> dict[str, int]:
                     counts["ranked"] += 1 if ranking["score"] > 0 else 0
                     continue
                 try:
-                    entry = INSTRUMENT_INDEX.get(ranking["instrument_id"] or "")
-                    mandate_countries = list(entry.get("countries", ())) if entry else []
-                    themes = list(entry.get("themes", ())) if entry else []
+                    mandate_countries, themes = mandate_geography(ranking, source_id)
                     _write(base_url, secret, "terminal_news_items", {
                         "id": story_id(url),
                         "canonical_url": url,
@@ -631,25 +664,26 @@ def run_cycle(*, publish: bool = True) -> dict[str, int]:
                 except Exception as exc:
                     print(f"News item write failed ({url}): {exc}")
                     continue
-                if ranking["score"] > 0:
-                    try:
-                        _write(base_url, secret, "terminal_news_relevance", {
-                            "news_id": story_id(url),
-                            "scope": "portfolio",
-                            "score": ranking["score"],
-                            "exposure_match": ranking["exposure_match"],
-                            "direct_match": ranking["direct_match"],
-                            "strategy_match": ranking["strategy_match"],
-                            "freshness": ranking["freshness"],
-                            "evidence_quality": ranking["evidence_quality"],
-                            "mapping_kind": ranking["mapping_kind"],
-                            "explanation": ranking["explanation"],
-                            "ranking_version": RANKING_VERSION,
-                            "exposure_snapshot_time": snapshot_time.isoformat() if snapshot_time else None,
-                        }, upsert=True, conflict="news_id,scope")
-                        counts["ranked"] += 1
-                    except Exception as exc:
-                        print(f"Relevance write failed ({url}): {exc}")
+                # Upsert zero too: otherwise a former positive score survives
+                # reclassification forever. Ranked reads filter score > 0.
+                try:
+                    _write(base_url, secret, "terminal_news_relevance", {
+                        "news_id": story_id(url),
+                        "scope": "portfolio",
+                        "score": ranking["score"],
+                        "exposure_match": ranking["exposure_match"],
+                        "direct_match": ranking["direct_match"],
+                        "strategy_match": ranking["strategy_match"],
+                        "freshness": ranking["freshness"],
+                        "evidence_quality": ranking["evidence_quality"],
+                        "mapping_kind": "mapped" if ranking["mapping_kind"] == "none" else ranking["mapping_kind"],
+                        "explanation": ranking["explanation"],
+                        "ranking_version": RANKING_VERSION,
+                        "exposure_snapshot_time": snapshot_time.isoformat() if snapshot_time else None,
+                    }, upsert=True, conflict="news_id,scope")
+                    counts["ranked"] += 1 if ranking["score"] > 0 else 0
+                except Exception as exc:
+                    print(f"Relevance write failed ({url}): {exc}")
         except Exception as exc:
             counts["sources_failed"] += 1
             print(f"Source {source.get('id')} failed: {exc}")

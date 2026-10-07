@@ -9,6 +9,8 @@ from dashboard.terminal_news import (
     backoff_delay,
     canonical_url,
     collect_source,
+    current_exposure,
+    mandate_geography,
     match_exposure,
     match_factor,
     parse_retry_after,
@@ -213,6 +215,31 @@ class RankingTest(unittest.TestCase):
 
 
 class PublishingTest(unittest.TestCase):
+    def test_reclassified_story_overwrites_old_positive_score_with_zero(self):
+        from dashboard.terminal_news import RANKING_VERSION, run_cycle
+
+        now = datetime.now(timezone.utc)
+        item = {"headline": "Federal Reserve approves bank application", "snippet": None,
+                "url": "https://example.com/approval", "publisher": "Federal Reserve",
+                "published_at": now}
+        source = {"id": "fed-press", "quality": 1.0, "attribution": "Federal Reserve"}
+        with patch("dashboard.terminal_news.news_enabled", return_value=True), \
+             patch("dashboard.terminal_news.SOURCES", [source]), \
+             patch("dashboard.terminal_news.collect_source", return_value=([item], "", None, False)), \
+             patch("dashboard.terminal_news.current_exposure",
+                   return_value=({"ASML": 1.0}, {}, {}, {}, now)), \
+             patch("dashboard.supabase_publisher._settings", return_value=("https://example.com", "test")), \
+             patch("dashboard.supabase_publisher._write") as write, \
+             patch("dashboard.terminal_news.urlopen", return_value=MagicMock()):
+            counts = run_cycle(publish=True)
+        rows = [call.args[3] for call in write.call_args_list
+                if call.args[2] == "terminal_news_relevance"]
+        self.assertEqual(counts["ranked"], 0)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["score"], 0)
+        self.assertEqual(rows[0]["ranking_version"], RANKING_VERSION)
+        self.assertIn(rows[0]["mapping_kind"], ("direct", "mapped", "inferred"))
+
     def test_multiple_items_keep_exposure_factors_after_geography_stamp(self):
         from dashboard.terminal_news import run_cycle
 
@@ -245,6 +272,62 @@ class PublishingTest(unittest.TestCase):
         stamped = [row for table, row in writes if table == "terminal_news_items"]
         self.assertEqual(len(stamped), 2)
         self.assertEqual(stamped[0]["event_countries"], ["US"])
+
+
+class PolicyRelevanceTest(unittest.TestCase):
+    def rank(self, headline, weights=None):
+        return rank_story({"headline": headline, "snippet": None, "published_at": _now()},
+                          {"ASML": 1.0} if weights is None else weights,
+                          {}, {}, {"europe ex uk": 1.0}, _now(), _now(), 1.0)
+
+    def test_institution_name_is_not_economic_evidence(self):
+        for headline in ("Federal Reserve approves bank application",
+                         "Federal Reserve announces enforcement action",
+                         "European Central Bank approves bank application"):
+            with self.subTest(headline=headline):
+                ranking = self.rank(headline)
+                self.assertEqual(ranking["score"], 0)
+                self.assertEqual(mandate_geography(ranking, "fed-press"), ([], []))
+
+    def test_real_policy_topics_score_and_stamp_mandate(self):
+        ranking = self.rank("Federal Reserve issues FOMC statement")
+        self.assertGreater(ranking["score"], 0)
+        self.assertEqual(mandate_geography(ranking, "fed-press")[0], ["US"])
+        ecb = self.rank("Monetary policy decisions")
+        countries, themes = mandate_geography(ecb, "ecb-press")
+        self.assertEqual(len(countries), 21)
+        self.assertIn("BG", countries)
+        self.assertIn("PT", countries)
+        self.assertNotIn("GB", countries)
+        self.assertIn("geo:central-bank-mandate", themes)
+        self.assertEqual(mandate_geography(ecb, "gdelt-markets"), ([], []))
+
+    def test_macro_does_not_claim_relevance_to_empty_portfolio(self):
+        self.assertEqual(self.rank("Interest rates decision", {})["score"], 0)
+
+    def test_held_instrument_still_scores_in_routine_announcement(self):
+        self.assertGreater(self.rank("Federal Reserve approves ASML application")["score"], 0)
+
+    def test_listing_symbol_keeps_catalogue_geography(self):
+        ranking = self.rank("SPY climbs", {"SPY": 1.0})
+        self.assertGreater(ranking["score"], 0)
+        self.assertEqual(mandate_geography(ranking, "gdelt-markets")[0], ["US"])
+
+
+class GrossExposureTest(unittest.TestCase):
+    def test_shorts_zero_and_invalid_values(self):
+        row = {"observed_at": _now().isoformat(), "bundle": {"positions": [
+            {"symbol": "ASML", "native_market_value_base": 75, "sector": "technology"},
+            {"symbol": "SPY", "native_market_value_base": -25, "sector": "broad equity"},
+            {"symbol": "ZERO", "native_market_value_base": 0, "market_value": 999},
+            {"symbol": "BAD", "native_market_value_base": "invalid"},
+            {"symbol": "NAN", "native_market_value_base": float("nan")},
+        ]}}
+        with patch("dashboard.terminal_news._service_get", return_value=[row]):
+            weights, _, sectors, _, observed = current_exposure("https://example.com", "test")
+        self.assertEqual(weights, {"ASML": 0.75, "SPY": 0.25})
+        self.assertEqual(sectors, {"technology": 0.75, "broad equity": 0.25})
+        self.assertEqual(observed, _now())
 
 
 if __name__ == "__main__":

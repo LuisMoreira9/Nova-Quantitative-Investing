@@ -36,3 +36,13 @@ Re-running Install re-enables the two task definitions. Recheck process identiti
 This PC cannot collect while asleep or powered off. Tasks resume after Windows login while the host is awake. Closing Codex or a browser does not stop Task Scheduler. Windows sign-out ends this interactive task context, and TWS authentication is still required after a reboot. Continuous coverage requires an always-on host and a supported broker gateway/login arrangement; no power settings or TWS credentials were changed here.
 
 Native scheduling references: [Microsoft task settings](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtasksettingsset), [Windows logon types](https://learn.microsoft.com/en-us/windows/win32/api/taskschd/ne-taskschd-task_logon_type). Broker dependency: [IB Gateway/TWS architecture](https://www.interactivebrokers.com/docs/tws-api/doc/architecture/the-trader-workstation/the-ib-gateway).
+
+## News ranking revision 4
+
+Routine Fed/ECB institution names no longer establish macro or regional relevance. Actual rates, inflation and monetary-policy topics can earn the existing capped broad-market score when holdings exist; held symbols and verified factor matches still count. Gross exposure includes absolute short values, preserves actual zero base values and skips malformed/nonfinite values. This is a relevance heuristic, not a return-impact prediction. Strategy-specific matching remains unimplemented.
+
+Geography is a catalogue instrument mandate or an official central-bank policy mandate, never a newspaper's headquarters or an extracted article event location. Policy stories from the reviewed Fed source map to US; the reviewed ECB source maps to the 21 euro-area members as of 7 October 2026, including Bulgaria. Unknown geography remains Global. The UI evidence drawer identifies the mandate kind; this does not model cross-border spillovers. References are recorded next to `POLICY_COUNTRIES` in the collector.
+
+Deploy the frontend's `score=gt.0` Ranked filter before updating the collector: revision 4 upserts zero scores so reclassified headlines lose obsolete positive relevance. Zero rows remain inspectable and headlines remain in Latest. Only stories still returned by current feeds are recomputed; older retained stories can retain an earlier ranking version. No migration or backfill is needed.
+
+For a news-only update, disable and stop `NQC-News-Reporting`, cherry-pick the tested code, run tests and `python -m dashboard.terminal_news --once` (read-only), then enable and start that exact task. Confirm a successful cycle and revision 4 rows. Leave `NQC-Portfolio-Reporting` running. Never launch a second watcher as a recovery workaround.
