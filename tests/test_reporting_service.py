@@ -12,7 +12,9 @@ class ReportingServiceTest(unittest.TestCase):
     def test_duplicate_blocked_other_service_allowed_and_crash_releases(self):
         with TemporaryDirectory() as directory:
             child = subprocess.Popen(
-                [sys.executable, '-c',
+                # Windows venv executables spawn a worker; terminate the actual
+                # interpreter so this check measures OS lock release on crash.
+                [getattr(sys, '_base_executable', sys.executable), '-c',
                  'from pathlib import Path; import sys,time; '
                  'from dashboard.reporting_service import reporter_instance; '
                  'lock=reporter_instance("portfolio", Path(sys.argv[1])); lock.__enter__(); '
