@@ -45,6 +45,21 @@ PERFORMANCE_CASH_TYPES = {
     "Broker Interest Paid", "Broker Interest Received", "Broker Fees", "Other Fees",
     "Advisor Fees", "Bond Interest Paid", "Bond Interest Received", "Commission Adjustments",
 }
+CASH_FLOW_FIELDS = (
+    "netTradesPurchases", "netTradesSales", "commissions", "dividends", "paymentInLieu",
+    "brokerInterest", "bondInterest", "withholdingTax", "brokerFees", "otherFees",
+    "advisorFees", "clientFees", "depositWithdrawals", "internalTransfers", "other",
+    "transactionTax", "salesTax", "referralFee", "otherIncome", "accountTransfers",
+    "debitCardActivity", "billPay", "carbonCredits", "donations", "excessFundSweep",
+    "paxosTransfers", "ipoSubscription", "insuredDepositInterest",
+    "commissionCreditsRedemption", "feesReceivables", "taxReceivables",
+    "linkingAdjustments", "withholding871m", "withholdingCollectedTax", "cfdCharges",
+    "slbNetSecuritiesLentActivity", "realizedForexVm", "fxTranslationGainLoss",
+)
+CASH_BALANCE_FIELDS = ("startingCash", "endingCash", "endingSettledCash")
+POSITION_NAV_COMPONENTS = {"STK": "stock", "WAR": "stock", "OPT": "options", "FUND": "funds", "BOND": "bonds"}
+POSITION_VALUE_TOLERANCE = Decimal("0.01")
+CASH_NAV_TOLERANCE = Decimal("0.001")
 
 
 class FlexError(ValueError):
@@ -121,8 +136,13 @@ class FlexImport:
     source_sha256: str
     days: dict = field(default_factory=dict)
     nav: dict = field(default_factory=dict)
+    equity: dict = field(default_factory=dict)
+    cash_report: dict = field(default_factory=dict)
+    positions: dict = field(default_factory=dict)
     trades: dict = field(default_factory=dict)
     cash: dict = field(default_factory=dict)
+    corporate_action_rows: dict = field(default_factory=dict)
+    reconciliation: dict = field(default_factory=dict)
     issues: set = field(default_factory=set)
     duplicate_rows: int = 0
     corporate_actions: int = 0
@@ -130,7 +150,7 @@ class FlexImport:
 
     def report(self) -> dict:
         return {
-            "schema_version": 1, "source_sha256": self.source_sha256,
+            "schema_version": 2, "source_sha256": self.source_sha256,
             "scope": "local_statement_validation_only",
             "status": "needs_review" if self.issues else "validated_core_records",
             "account_designation": "not_verified_from_xml",
@@ -141,7 +161,11 @@ class FlexImport:
             "equivalent_duplicate_rows": self.duplicate_rows,
             "corporate_actions": self.corporate_actions, "transfers": self.transfers,
             "calendar_coverage_verified": False,
-            "validation_scope": ["nav_bridge", "execution_records", "cash_transaction_records"],
+            "validation_scope": [
+                "nav_bridge", "execution_records", "cash_transaction_records",
+                "cash_balances", "position_quantities", "position_values", "corporate_actions",
+            ],
+            "balance_reconciliation": self.reconciliation,
             "cash_classifications": {
                 kind: sum(row["classification"] == kind for row in self.cash.values())
                 for kind in ("external_flow", "performance", "review")
@@ -149,7 +173,7 @@ class FlexImport:
             "issues": sorted(self.issues), "verified_return_pct": None,
             "return_blockers": [
                 "paper_account_and_opening_baseline_require_acceptance",
-                "full_position_cash_and_corporate_action_reconciliation_pending",
+                "cash_and_position_discrepancies_require_review",
                 "strategy_capital_and_transfer_baselines_missing",
             ],
         }
@@ -223,13 +247,88 @@ def read_flex(path: Path) -> FlexImport:
             day = _date(_required(row, "reportDate"))
             if _required(row, "accountId") != account or _currency(row) != result.base_currency or day > end:
                 raise FlexError("nav_scope_mismatch")
-            result.duplicate_rows += _upsert(result.nav, day, {"total": _number(row, "total")}, "nav")
+            equity = {
+                "total": _number(row, "total"),
+                **{key: _number(row, key) for key in ("cash", "stock", "options", "funds", "bonds")
+                   if row.get(key) not in (None, "")},
+            }
+            result.duplicate_rows += _upsert(result.equity, day, equity, "equity_summary")
+            result.duplicate_rows += _upsert(result.nav, day, {"total": equity["total"]}, "nav")
             if day == end:
                 closing = True
-                if abs(result.nav[day]["total"] - bridge_values["endingValue"]) > ROUNDING:
+                if abs(equity["total"] - bridge_values["endingValue"]) > ROUNDING:
                     result.issues.add("closing_nav_mismatch")
         if not closing:
             raise FlexError("missing_closing_nav")
+        cash_rows = statement.findall("./CashReport/CashReportCurrency")
+        for row in cash_rows:
+            if _required(row, "accountId") != account:
+                raise FlexError("mixed_accounts")
+            if _date(_required(row, "fromDate")) != start or _date(_required(row, "toDate")) != end:
+                raise FlexError("cash_report_date_mismatch")
+            level = _required(row, "levelOfDetail")
+            if level == "BaseCurrency":
+                if row.get("currency") != "BASE_SUMMARY":
+                    raise FlexError("cash_report_base_currency_mismatch")
+                currency = result.base_currency
+            elif level == "Currency":
+                currency = _currency(row)
+            else:
+                raise FlexError("unsupported_cash_report_detail")
+            balances = {key: _number(row, key) for key in CASH_BALANCE_FIELDS if row.get(key) not in (None, "")}
+            balances.update({key: _number(row, key) for key in CASH_FLOW_FIELDS if row.get(key) not in (None, "")})
+            balances["level"] = level
+            result.duplicate_rows += _upsert(
+                result.cash_report, (start, level, currency), balances, "cash_report"
+            )
+        position_rows = statement.findall("./OpenPositions/OpenPosition")
+        for row in position_rows:
+            if _required(row, "accountId") != account:
+                raise FlexError("mixed_accounts")
+            if _date(_required(row, "reportDate")) != end or row.get("levelOfDetail") != "SUMMARY":
+                raise FlexError("position_detail_or_report_date_mismatch")
+            category = _required(row, "assetCategory")
+            if category not in POSITION_NAV_COMPONENTS:
+                result.issues.add("unsupported_position_category")
+            quantity = _number(row, "position")
+            multiplier = _number(row, "multiplier")
+            mark = _number(row, "markPrice")
+            fx = _number(row, "fxRateToBase")
+            value = _number(row, "positionValue")
+            if quantity == 0 or multiplier <= 0 or fx <= 0 or mark < 0:
+                raise FlexError("invalid_position_values")
+            if (quantity > 0) != (value >= 0):
+                result.issues.add("position_value_sign_mismatch")
+            if abs(value - quantity * mark * multiplier) > max(ROUNDING, abs(value) * Decimal("0.001")):
+                result.issues.add("position_mark_value_mismatch")
+            position = {
+                "quantity": quantity, "mark": mark, "multiplier": multiplier,
+                "fx_to_base": fx, "value": value, "category": category,
+                "currency": _currency(row), "side": _required(row, "side"),
+                "sub_category": row.get("subCategory", "").strip(),
+            }
+            result.duplicate_rows += _upsert(
+                result.positions, (start, _required(row, "conid"), position["currency"]),
+                position, "position",
+            )
+        for row in statement.findall("./CorporateActions/CorporateAction"):
+            if _required(row, "accountId") != account:
+                raise FlexError("mixed_accounts")
+            if _date(_required(row, "reportDate")) != end or row.get("levelOfDetail") != "DETAIL":
+                raise FlexError("corporate_action_detail_or_report_date_mismatch")
+            action = {
+                "date": end, "effective_at": _instant(_required(row, "dateTime")),
+                "type": _required(row, "type"), "conid": _required(row, "conid"),
+                "currency": _currency(row), "quantity": _number(row, "quantity"),
+                "amount": _number(row, "amount"), "proceeds": _number(row, "proceeds"),
+                "value": _number(row, "value"), "fx_to_base": _number(row, "fxRateToBase"),
+                "multiplier": _number(row, "multiplier"), "action_id": _required(row, "actionID"),
+            }
+            if action["fx_to_base"] <= 0 or action["multiplier"] <= 0:
+                raise FlexError("invalid_corporate_action_values")
+            result.duplicate_rows += _upsert(
+                result.corporate_action_rows, action["action_id"], action, "corporate_action"
+            )
         for row in statement.findall("./Trades/Trade"):
             _required(row, "accountId")
             if row.get("levelOfDetail") != "EXECUTION":
@@ -252,6 +351,7 @@ def read_flex(path: Path) -> FlexImport:
                 "executed_at": executed, "trade_date": trade_day, "report_date": report_day,
                 "symbol": _required(row, "symbol"), "conid": _required(row, "conid"),
                 "currency": _currency(row), "side": side.lower(), "quantity": abs(quantity), "price": price,
+                "multiplier": _number(row, "multiplier"),
                 "commission": _number(row, "ibCommission"), "commission_currency": _currency(row, "ibCommissionCurrency"),
                 "taxes": _number(row, "taxes"), "fx_to_base": _number(row, "fxRateToBase"),
                 "order_ref": row.get("orderReference", "").strip(),
@@ -289,8 +389,8 @@ def read_flex(path: Path) -> FlexImport:
                 raise FlexError("invalid_cash_fx_rate")
             # Date-only cash rows deliberately keep effective_at=None, not midnight UTC.
             result.duplicate_rows += _upsert(result.cash, _required(row, "transactionID"), cash, "cash_transaction")
-        result.corporate_actions += len(statement.findall("./CorporateActions/CorporateAction"))
         result.transfers += len(statement.findall("./Transfers/Transfer"))
+    result.corporate_actions = len(result.corporate_action_rows)
     previous = None
     for day, bridge in sorted(result.days.items()):
         if previous is not None and abs(bridge["startingValue"] - previous["endingValue"]) > ROUNDING:
@@ -302,11 +402,336 @@ def read_flex(path: Path) -> FlexImport:
             result.issues.add("funding_transactions_do_not_match_nav_bridge")
         if any(bridge[k] for k in ("assetTransfers", "internalCashTransfers", "paxosTransfers", "linkingAdjustments")):
             result.issues.add("transfer_components_require_classification")
-    if result.corporate_actions:
-        result.issues.add("corporate_actions_require_reconciliation")
+    result.reconciliation = reconcile_balances(result)
     if result.transfers:
         result.issues.add("transfers_require_classification")
     return result
+
+
+def _within(actual: Decimal, expected: Decimal, relative: Decimal = Decimal("0")) -> bool:
+    return abs(actual - expected) <= max(ROUNDING, abs(expected) * relative)
+
+
+def reconcile_balances(imported: FlexImport) -> dict:
+    """Reconcile cash balances, holdings and corporate actions without publishing amounts."""
+    if not imported.cash_report or not imported.positions:
+        return {"status": "unavailable", "reason": "cash_report_or_open_positions_missing"}
+
+    cash_base = {
+        day: row for (day, level, _currency_code), row in imported.cash_report.items()
+        if level == "BaseCurrency"
+    }
+    cash_native = {
+        (day, currency): row
+        for (day, level, currency), row in imported.cash_report.items()
+        if level == "Currency"
+    }
+    statement_days = sorted(imported.days)
+    statement_gaps = [
+        later.isoformat() for earlier, later in zip(statement_days, statement_days[1:])
+        if (later - earlier).days > 4
+    ]
+
+    def continuity(series):
+        breaks = []
+        missing = []
+        previous = None
+        for day, row in series:
+            start = row.get("startingCash")
+            end = row.get("endingCash")
+            if start is None or end is None:
+                missing.append(day.isoformat())
+                continue
+            if previous is not None and not _within(start, previous):
+                breaks.append(day.isoformat())
+            previous = end
+        return breaks, missing
+
+    base_breaks, base_missing = continuity(sorted(cash_base.items()))
+    if base_breaks or base_missing:
+        imported.issues.add("cash_base_continuity_break")
+    native_breaks: dict[str, int] = {}
+    native_missing: list[str] = []
+    for currency in sorted({currency for _, currency in cash_native}):
+        series = sorted((day, row) for (day, row_currency), row in cash_native.items()
+                        if row_currency == currency)
+        breaks, missing = continuity(series)
+        native_breaks[currency] = len(breaks)
+        native_missing.extend(f"{day}:{currency}" for day in missing)
+    if any(native_breaks.values()) or native_missing:
+        imported.issues.add("cash_native_continuity_break")
+    if statement_gaps:
+        imported.issues.add("statement_calendar_gap")
+
+    nav_cash_checks = nav_cash_exact = nav_cash_close = 0
+    nav_cash_mismatch: list[str] = []
+    for day, row in sorted(cash_base.items()):
+        ending = row.get("endingCash")
+        nav_cash = imported.equity.get(day, {}).get("cash")
+        if ending is None or nav_cash is None:
+            continue
+        nav_cash_checks += 1
+        if abs(ending - nav_cash) <= ROUNDING:
+            nav_cash_exact += 1
+        elif _within(ending, nav_cash, CASH_NAV_TOLERANCE):
+            nav_cash_close += 1
+        else:
+            nav_cash_mismatch.append(day.isoformat())
+    if nav_cash_mismatch:
+        imported.issues.add("cash_balance_nav_mismatch")
+
+    trade_proceeds: dict[tuple, Decimal] = {}
+    trade_commissions: dict[tuple, Decimal] = {}
+    for trade in imported.trades.values():
+        key = (trade["report_date"], trade["currency"])
+        sign = Decimal(-1) if trade["side"] == "buy" else Decimal(1)
+        trade_proceeds[key] = trade_proceeds.get(key, Decimal(0)) + (
+            sign * trade["quantity"] * trade["price"] * trade["multiplier"]
+        )
+        if trade["commission_currency"] == trade["currency"]:
+            trade_commissions[key] = trade_commissions.get(key, Decimal(0)) + trade["commission"]
+
+    def compare_components(field: str, actuals: dict[tuple, Decimal], label: str) -> list[str]:
+        mismatches = []
+        for key, row in sorted(cash_native.items()):
+            expected = row.get(field)
+            actual = actuals.get(key, Decimal(0))
+            if expected is None or (expected == 0 and actual == 0):
+                continue
+            if not _within(actual, expected, CASH_NAV_TOLERANCE):
+                mismatches.append(f"{key[0].isoformat()}:{key[1]}")
+        if mismatches:
+            imported.issues.add(label)
+        return mismatches
+
+    # IBKR reports purchase proceeds as negative and sale proceeds as positive.
+    trade_component_mismatches = []
+    trade_component_checks = 0
+    for key, row in sorted(cash_native.items()):
+        expected = row.get("netTradesPurchases", Decimal(0)) + row.get("netTradesSales", Decimal(0))
+        actual = trade_proceeds.get(key, Decimal(0))
+        if expected == 0 and actual == 0:
+            continue
+        trade_component_checks += 1
+        if not _within(actual, expected, CASH_NAV_TOLERANCE):
+            trade_component_mismatches.append(f"{key[0].isoformat()}:{key[1]}")
+    if trade_component_mismatches:
+        imported.issues.add("cash_trade_component_mismatch")
+
+    commission_mismatches = compare_components(
+        "commissions", trade_commissions, "cash_commission_component_mismatch"
+    )
+    income_actuals: dict[tuple, Decimal] = {}
+    for cash_row in imported.cash.values():
+        field = {
+            "Dividends": "dividends",
+            "Payment In Lieu Of Dividends": "paymentInLieu",
+            "Broker Interest Paid": "brokerInterest",
+            "Broker Interest Received": "brokerInterest",
+            "Bond Interest Paid": "bondInterest",
+            "Bond Interest Received": "bondInterest",
+        }.get(cash_row["type"])
+        if field:
+            key = (cash_row["report_date"], cash_row["currency"])
+            income_actuals[key] = income_actuals.get(key, Decimal(0)) + cash_row["amount"]
+    income_mismatches = []
+    for key, row in sorted(cash_native.items()):
+        expected = sum((row.get(field, Decimal(0)) for field in
+                        ("dividends", "paymentInLieu", "brokerInterest", "bondInterest")), Decimal(0))
+        actual = income_actuals.get(key, Decimal(0))
+        if expected == 0 and actual == 0:
+            continue
+        if not _within(actual, expected, CASH_NAV_TOLERANCE):
+            income_mismatches.append(f"{key[0].isoformat()}:{key[1]}")
+    if income_mismatches:
+        imported.issues.add("cash_income_component_mismatch")
+
+    funding_actuals: dict[tuple, Decimal] = {}
+    for cash_row in imported.cash.values():
+        if cash_row["classification"] == "external_flow":
+            key = (cash_row["report_date"], cash_row["currency"])
+            funding_actuals[key] = funding_actuals.get(key, Decimal(0)) + cash_row["amount"]
+    funding_mismatches = compare_components(
+        "depositWithdrawals", funding_actuals, "cash_funding_component_mismatch"
+    )
+
+    movement_residuals = []
+    for key, row in sorted(cash_native.items()):
+        start = row.get("startingCash")
+        end = row.get("endingCash")
+        if start is None or end is None:
+            continue
+        known = sum((row.get(field, Decimal(0)) for field in CASH_FLOW_FIELDS), Decimal(0))
+        if not _within(end - start, known, CASH_NAV_TOLERANCE):
+            movement_residuals.append(f"{key[0].isoformat()}:{key[1]}")
+    if movement_residuals:
+        imported.issues.add("cash_movement_components_require_review")
+
+    position_days = sorted({day for (day, _, _) in imported.positions})
+    closing: dict[date, dict[tuple, Decimal]] = {day: {} for day in position_days}
+    mark_value_mismatches = 0
+    for (day, conid, currency), position in imported.positions.items():
+        closing[day][(conid, currency)] = position["quantity"]
+        if not _within(
+            position["value"], position["quantity"] * position["mark"] * position["multiplier"],
+            Decimal("0.001"),
+        ):
+            mark_value_mismatches += 1
+    if mark_value_mismatches:
+        imported.issues.add("position_mark_value_mismatch")
+
+    trade_deltas: dict[date, dict[tuple, Decimal]] = {}
+    for trade in imported.trades.values():
+        day = trade["report_date"]
+        key = (trade["conid"], trade["currency"])
+        sign = Decimal(1) if trade["side"] == "buy" else Decimal(-1)
+        day_trades = trade_deltas.setdefault(day, {})
+        day_trades[key] = day_trades.get(key, Decimal(0)) + sign * trade["quantity"]
+    ca_deltas: dict[date, dict[tuple, Decimal]] = {}
+    for action in imported.corporate_action_rows.values():
+        key = (action["conid"], action["currency"])
+        day_actions = ca_deltas.setdefault(action["date"], {})
+        day_actions[key] = day_actions.get(key, Decimal(0)) + action["quantity"]
+
+    quantity_mismatch_days = []
+    quantity_mismatch_keys = 0
+    empty_position_days = [day.isoformat() for day in position_days if not closing[day]]
+    if empty_position_days:
+        imported.issues.add("position_snapshot_missing")
+    for previous_day, day in zip(position_days, position_days[1:]):
+        expected = dict(closing[previous_day])
+        for key, quantity in trade_deltas.get(day, {}).items():
+            expected[key] = expected.get(key, Decimal(0)) + quantity
+        for key, quantity in ca_deltas.get(day, {}).items():
+            expected[key] = expected.get(key, Decimal(0)) + quantity
+        keys = set(expected) | set(closing[day])
+        differences = sum(
+            expected.get(key, Decimal(0)) != closing[day].get(key, Decimal(0)) for key in keys
+        )
+        if differences:
+            quantity_mismatch_days.append(day.isoformat())
+            quantity_mismatch_keys += differences
+    if quantity_mismatch_days:
+        imported.issues.add("position_quantity_mismatch")
+
+    ca_quantity_mismatches = 0
+    ca_quantity_reconciled = 0
+    # Reconcile each corporate action against the observed change after same-day trades.
+    grouped_actions: dict[tuple, Decimal] = {}
+    for action in imported.corporate_action_rows.values():
+        key = (action["date"], action["conid"], action["currency"])
+        grouped_actions[key] = grouped_actions.get(key, Decimal(0)) + action["quantity"]
+    for (day, conid, currency), expected_quantity in sorted(grouped_actions.items()):
+        if day not in closing:
+            ca_quantity_mismatches += 1
+            continue
+        index = position_days.index(day)
+        previous = closing[position_days[index - 1]].get((conid, currency), Decimal(0)) if index else Decimal(0)
+        observed = (
+            closing[day].get((conid, currency), Decimal(0))
+            - previous - trade_deltas.get(day, {}).get((conid, currency), Decimal(0))
+        )
+        if observed == expected_quantity:
+            ca_quantity_reconciled += 1
+        else:
+            ca_quantity_mismatches += 1
+    if ca_quantity_mismatches:
+        imported.issues.add("corporate_action_quantity_mismatch")
+
+    ca_cash_reconciled = 0
+    ca_cash_unmatched = 0
+    for action in imported.corporate_action_rows.values():
+        effect = action["amount"] + action["proceeds"]
+        if effect == 0:
+            continue
+        matched = any(
+            cash_row["report_date"] == action["date"]
+            and cash_row["currency"] == action["currency"]
+            and (cash_row["action_id"] == action["action_id"] or cash_row["conid"] == action["conid"])
+            for cash_row in imported.cash.values()
+        )
+        if matched:
+            ca_cash_reconciled += 1
+        else:
+            ca_cash_unmatched += 1
+    if ca_cash_unmatched:
+        imported.issues.add("corporate_action_cash_effect_requires_review")
+
+    values_by_day_component: dict[tuple, Decimal] = {}
+    for (day, _, _), position in imported.positions.items():
+        component = POSITION_NAV_COMPONENTS.get(position["category"])
+        if component is None:
+            continue
+        key = (day, component)
+        values_by_day_component[key] = (
+            values_by_day_component.get(key, Decimal(0)) + position["value"] * position["fx_to_base"]
+        )
+    nav_component_checks = nav_component_matched_days = 0
+    nav_component_mismatch_days = []
+    for day in position_days:
+        equity = imported.equity.get(day, {})
+        checks = matches = 0
+        for component in set(POSITION_NAV_COMPONENTS.values()):
+            expected = equity.get(component)
+            if expected is None:
+                continue
+            checks += 1
+            actual = values_by_day_component.get((day, component), Decimal(0))
+            if _within(actual, expected, POSITION_VALUE_TOLERANCE):
+                matches += 1
+        if checks:
+            nav_component_checks += checks
+            if checks == matches:
+                nav_component_matched_days += 1
+            else:
+                nav_component_mismatch_days.append(day.isoformat())
+    if nav_component_mismatch_days:
+        imported.issues.add("position_value_nav_mismatch")
+
+    return {
+        "status": "available",
+        "tolerances": {
+            "money": str(ROUNDING),
+            "nav_relative": str(CASH_NAV_TOLERANCE),
+            "position_value_relative": str(POSITION_VALUE_TOLERANCE),
+        },
+        "cash": {
+            "base_days": len(cash_base), "native_currency_rows": len(cash_native),
+            "statement_gaps": statement_gaps,
+            "base_continuity_breaks": len(base_breaks),
+            "base_missing_balances": base_missing,
+            "native_continuity_breaks": native_breaks,
+            "native_missing_balances": native_missing,
+            "nav_cash_checks": nav_cash_checks, "nav_cash_exact": nav_cash_exact,
+            "nav_cash_within_tolerance": nav_cash_close,
+            "nav_cash_mismatch_days": nav_cash_mismatch,
+            "trade_component_checks": trade_component_checks,
+            "trade_component_mismatch_days": trade_component_mismatches,
+            "commission_component_mismatch_days": commission_mismatches,
+            "income_component_mismatch_days": income_mismatches,
+            "funding_component_mismatch_days": funding_mismatches,
+            "movement_residual_days": movement_residuals,
+        },
+        "positions": {
+            "baseline_day": position_days[0].isoformat() if position_days else None,
+            "position_days": len(position_days),
+            "transitions": max(0, len(position_days) - 1),
+            "quantity_mismatch_days": quantity_mismatch_days,
+            "quantity_mismatch_keys": quantity_mismatch_keys,
+            "empty_position_days": empty_position_days,
+            "mark_value_mismatch_rows": mark_value_mismatches,
+            "nav_component_checks": nav_component_checks,
+            "nav_component_matched_days": nav_component_matched_days,
+            "nav_component_mismatch_days": nav_component_mismatch_days,
+        },
+        "corporate_actions": {
+            "rows": len(imported.corporate_action_rows),
+            "quantity_reconciled": ca_quantity_reconciled,
+            "quantity_mismatches": ca_quantity_mismatches,
+            "cash_effect_reconciled": ca_cash_reconciled,
+            "cash_effect_unmatched": ca_cash_unmatched,
+        },
+    }
 
 
 def reconcile_ledger(imported: FlexImport, path: Path) -> dict:

@@ -84,3 +84,40 @@ Verification: **25 offline tests passed** (11 importer/reconciliation, seven rea
 ### Next bounded slice
 
 Normalize and reconcile daily cash balances, holdings and the corporate action, then stage the missing broker fills and timestamp provenance in a separate private accounting ledger. Preserve the running legacy ledger until reconciliation is complete; no blind overwrite or assumed zero fees. Only then accept an opening account baseline and strategy capital/transfer rules and connect verified return calculations. The current parser is worktree-only; no running-checkout cherry-pick, reporter/executor restart, database migration or frontend deployment occurred.
+
+## Balance reconciliation checkpoint — 25 November 2026
+
+`dashboard.flex_import` now normalizes and reconciles the Cash Report, open positions and corporate actions in addition to the existing NAV, execution and cash-transaction checks. The report remains local and redacted: it prints counts, report dates, currency codes, tolerances and reason codes, never balances, marks, conids, symbols or private identifiers.
+
+Implemented:
+
+- Parses the base-currency and native-currency Cash Report rows with exact Decimal money. Checks daily `startingCash` continuity, ties base `endingCash` to `EquitySummaryInBase.cash`, and compares native trade proceeds, commissions, income and external funding with the report components.
+- Parses daily `OpenPositions` at summary detail. Validates signed quantities, multiplier, mark, FX and position value, then replays each next day as prior close + signed executions + corporate-action quantity. The first statement is an explicit baseline, not a claimed opening reconciliation.
+- Reconciles corporate-action quantity and cash effects. The current export contains one spinoff: its one-warrant quantity is present in the next close and the zero cash effect requires no separate cash row.
+- Ties base position value (`positionValue * fxRateToBase`) to the broker's `stock`, `options`, `funds` and `bonds` NAV components. Documented tolerances: EUR 0.02 for money, 0.1% for cash/NAV and 1% for position-value/NAV.
+- Adds `balance_reconciliation` to the redacted JSON report with per-area counts, mismatch dates, statement gaps and tolerances. `verified_return_pct` stays null.
+
+Real export result with `--ledger`:
+
+- 54 daily statements; 108 native-currency Cash Report rows; zero continuity breaks and zero statement gaps.
+- 54/54 base cash balances exactly match NAV cash; zero trade, commission, income, funding or movement-component residuals.
+- 53/53 position transitions match; zero quantity mismatches, zero empty snapshots and zero mark/multiplier mismatches.
+- 216/216 position-value/NAV component checks matched across 54 days.
+- One corporate action: quantity reconciled (1/1), zero quantity mismatches, zero unmatched cash effects.
+- The ledger comparison is unchanged: all 1,474 local fill IDs matched; symbol, currency, side, quantity, price and order-reference mismatches are zero; 901 timestamps differ and 6,869 statement-only execution IDs remain outside the legacy ledger.
+
+The top-level status remains `needs_review` because the ledger timestamp discrepancies and the missing opening/strategy-capital baselines are unresolved. This checkpoint reconciles daily broker balances and holdings; it does not certify the account opening baseline, complete calendar coverage or strategy returns.
+
+Commands:
+
+```powershell
+cd C:\Users\guiro\Documents\Nova-Quantitative-Investing-terminal
+& ..\Nova-Quantitative-Investing\.venv-windows\Scripts\python.exe -m dashboard.flex_import C:\Users\guiro\Downloads\NQC_Accounting_XML.xml --ledger ..\Nova-Quantitative-Investing\data\nova_strategy_execution_ledger.csv
+& ..\Nova-Quantitative-Investing\.venv-windows\Scripts\python.exe -m unittest tests.test_flex_import tests.test_balance_reconciliation tests.test_performance_readiness tests.test_terminal_public_summary
+```
+
+Verification: 32 offline tests passed (12 importer/parsing, six balance/position/corporate-action, seven readiness and seven public-summary). Synthetic fixtures cover a flat start, shorts, multi-currency marks, corporate-action quantity and cash effects, continuity breaks, component mismatches and report redaction.
+
+### Next bounded slice
+
+Stage the missing broker fills and timestamp provenance in a separate private accounting ledger, then accept an explicit opening account and strategy-capital baseline. Preserve the legacy ledger until the staged ledger is verified; no automatic return calculation, publisher change or public UI exposure is included here.

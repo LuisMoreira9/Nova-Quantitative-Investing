@@ -1,8 +1,8 @@
-"""Synthetic-only regressions for the actual NQC Flex export shape."""
+﻿"""Synthetic-only regressions for the actual NQC Flex export shape."""
 
 from copy import deepcopy
 import csv
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 import subprocess
@@ -185,13 +185,60 @@ class FlexImportTest(unittest.TestCase):
 
     def test_corrections_corporate_actions_and_transfers_are_not_silently_replayed(self):
         self.root.find(".//Trade").set("origTransactionID", "123")
-        ET.SubElement(self.root.find(".//CorporateActions"), "CorporateAction", accountId=ACCOUNT)
+        ET.SubElement(
+            self.root.find(".//CorporateActions"), "CorporateAction",
+            accountId=ACCOUNT, reportDate="2026-08-11", dateTime="2026-08-11;10:00:00 EDT",
+            levelOfDetail="DETAIL", type="SO", conid="222", currency="EUR",
+            quantity="1", amount="0", proceeds="0", value="0", fxRateToBase="1",
+            multiplier="1", actionID="PRIVATE-ACTION",
+        )
         ET.SubElement(self.root.find(".//Transfers"), "Transfer", accountId=ACCOUNT)
         result = self.read()
-        self.assertTrue({"trade_corrections_require_review", "corporate_actions_require_reconciliation",
+        self.assertTrue({"trade_corrections_require_review",
                          "transfers_require_classification"} <= result.issues)
+        self.assertEqual(result.corporate_actions, 1)
+        self.assertEqual(result.corporate_action_rows["PRIVATE-ACTION"]["type"], "SO")
+        self.assertEqual(result.reconciliation["status"], "unavailable")
         self.assertEqual(result.trades["PRIVATE-EXECUTION"]["original_transaction_id"], "123")
         self.assertIsNone(result.report()["verified_return_pct"])
+
+    def test_cash_report_positions_and_equity_components_are_parsed(self):
+        statement = self.root.find("FlexStatements/FlexStatement")
+        equity = statement.find("./EquitySummaryInBase/EquitySummaryByReportDateInBase[@reportDate='2026-08-11']")
+        equity.set("cash", "1000")
+        equity.set("stock", "50")
+        cash_report = self.root.find(".//CashReport")
+        ET.SubElement(cash_report, "CashReportCurrency", accountId=ACCOUNT, currency="BASE_SUMMARY",
+                      levelOfDetail="BaseCurrency", fromDate="2026-08-11", toDate="2026-08-11",
+                      startingCash="1000", endingCash="1000", endingSettledCash="1000",
+                      netTradesPurchases="0", netTradesSales="0", commissions="0", fxTranslationGainLoss="0")
+        ET.SubElement(cash_report, "CashReportCurrency", accountId=ACCOUNT, currency="EUR",
+                      levelOfDetail="Currency", fromDate="2026-08-11", toDate="2026-08-11",
+                      startingCash="1000", endingCash="1000", endingSettledCash="1000",
+                      netTradesPurchases="0", netTradesSales="0", commissions="0", fxTranslationGainLoss="0")
+        ET.SubElement(
+            statement.find("./OpenPositions"), "OpenPosition", accountId=ACCOUNT,
+            reportDate="2026-08-11", levelOfDetail="SUMMARY", assetCategory="STK",
+            subCategory="COMMON", side="Long", conid="111", symbol="SYNTHETIC",
+            currency="EUR", position="1", markPrice="50", multiplier="1",
+            fxRateToBase="1", positionValue="50",
+        )
+        ET.SubElement(
+            statement.find("./CorporateActions"), "CorporateAction", accountId=ACCOUNT,
+            reportDate="2026-08-11", dateTime="2026-08-11;10:00:00 EDT", levelOfDetail="DETAIL",
+            type="SO", conid="222", symbol="SYNTHETIC-WS", currency="EUR", quantity="1",
+            amount="0", proceeds="0", value="0", fxRateToBase="1", multiplier="1",
+            actionID="PRIVATE-ACTION",
+        )
+        imported = self.read()
+        self.assertEqual(len(imported.cash_report), 2)
+        self.assertEqual(len(imported.positions), 1)
+        self.assertEqual(str(imported.positions[(date(2026, 8, 11), "111", "EUR")]["value"]), "50")
+        self.assertEqual(str(imported.equity[date(2026, 8, 11)]["stock"]), "50")
+        self.assertEqual(imported.corporate_action_rows["PRIVATE-ACTION"]["type"], "SO")
+        self.assertEqual(imported.reconciliation["status"], "available")
+        self.assertEqual(imported.reconciliation["cash"]["nav_cash_exact"], 1)
+        self.assertEqual(imported.reconciliation["positions"]["nav_component_matched_days"], 1)
 
     def test_ledger_price_timestamp_missing_id_and_outside_period_are_distinguished(self):
         imported = self.read()
