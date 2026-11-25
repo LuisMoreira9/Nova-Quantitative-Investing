@@ -1,7 +1,7 @@
 # News sentiment and AI classification plan
 
-Checkpoint: 25 November 2026. Status: proposed; no schema, classifier,
-publisher or UI change is implemented by this document.
+Checkpoint: 25 November 2026. Status: pilot complete; production schema,
+classifier, publisher and UI are not implemented by this document.
 
 ## Goal
 
@@ -15,6 +15,19 @@ Turn the member news panel into a source-linked research feed that:
 4. Adds podcast episodes and published transcripts as long-form inputs.
 5. Keeps every score reproducible, labelled as AI-generated analysis, and
    separate from verified returns or trading signals.
+
+## Decision summary (25 November 2026)
+
+- Test all seven current sleeves. Four are scoreable now; three are test/demo or
+  profile-incomplete and are flagged rather than scored.
+- Market taxonomy covers regions, asset classes, seven equity styles and eleven
+  sectors.
+- Horizon is `weeks`.
+- No dedicated article pages. Reuse the inline Home drawer and source link.
+- First podcast batch is the three supplied episodes: The Macro Trading Floor,
+  Morgan Stanley Thoughts on the Market and Goldman Sachs The Markets.
+- Use OpenCode Go `deepseek-v4.1-flash` for the pilot. The API key route is
+  confirmed; the Go workload-terms caveat remains open.
 
 ## What already exists
 
@@ -46,12 +59,12 @@ Feasible, with these boundaries:
 | Reuters | Partial | No public RSS since 2020; `reuters.com` rejects automated access. Use GDELT or a Google News `site:reuters.com` feed for headline discovery only. |
 | Yahoo Finance | Yes, per symbol | General Yahoo Finance RSS is dead; per-symbol feeds still return headlines and summaries. |
 | Official sources | Yes | ECB, Fed and similar feeds are safe, high-quality and already supported. |
-| AI scoring | Yes | Structured output + reasoning effort `max` matches the requested model. Validate every response. |
-| Podcasts | Yes, with licensing care | Published transcripts or licensed transcript APIs are available; do not redistribute full transcripts. |
+| AI scoring | Yes | The OpenCode Go API key route works; the flat `scores` schema validated 6/6 pilot items. Validate every response. |
+| Podcasts | Yes, with licensing care | All three selected episodes have a usable transcript route; do not redistribute full transcripts. |
 | Full article text | No by default | Paywalls and publisher terms. Use snippets, licensed APIs, or explicit permission. |
 | Predictive claims | No | Scores are contemporaneous analysis, not a validated forecast or trading signal. |
 
-### Source checks run on 25 November 2026
+### Source and route checks run on 25 November 2026
 
 | Source | Result |
 | --- | --- |
@@ -59,6 +72,10 @@ Feasible, with these boundaries:
 | `https://feeds.finance.yahoo.com/rss/2.0/headline?s=ASML&region=US&lang=en-US` | HTTP 200, 16 items, fresh. |
 | `https://news.google.com/rss/search?q=when:24h+site:reuters.com&ceid=US:en&hl=en-US&gl=US` | HTTP 200, 100 items, but Google News indexing can lag; links go through Google News. |
 | Reuters direct feeds | No working public feed; old `feeds.reuters.com` addresses are dead. |
+| OpenCode Go `deepseek-v4.1-flash` | HTTP 200; valid JSON at `max_tokens=32000`; `max` and `high` both work. |
+| The Macro Trading Floor transcript | Public transcript page, 5,812 words; RSS has audio but no transcript tag. |
+| Morgan Stanley transcript | Publisher page, 6,302 words. |
+| Goldman Sachs transcript | Public PDF, 2,432 words. |
 
 ## Proposed architecture
 
@@ -76,7 +93,7 @@ classification queue (items without current prompt/model result)
         v
 news_sentiment worker (Python, service role)
         |
-        +--> OpenCode Go / DeepSeek API, structured JSON, effort=max
+        +--> OpenCode Go / DeepSeek API, flat JSON, effort=high|max
         |
         v
 terminal_news_sentiment (article x market/strategy)
@@ -85,7 +102,7 @@ terminal_news_sentiment (article x market/strategy)
 aggregate view / RPC (24h, 7d, 30d)
         |
         v
-member-only terminal UI (Home market strip, Strategy cards, article detail)
+member-only terminal UI (Home market strip, Strategy cards, inline article drawer)
 ```
 
 The classifier is a separate process from the collector so a model outage or
@@ -94,39 +111,51 @@ credentials and file-lock pattern.
 
 ## Market and strategy taxonomy
 
-Start with a fixed, versioned taxonomy. Do not let the model invent buckets.
+Decisions accepted on 25 November 2026: score all seven current sleeves for the
+pilot, use both regions and asset classes, split equities into style and sector
+buckets, and use a `weeks` horizon. The taxonomy is fixed and versioned; the
+model must not invent keys.
 
-### Market buckets
+### Market buckets (34)
 
-- Regions: US, Euro area, UK, Europe ex UK, Japan, China, Asia ex Japan,
-  Emerging markets, Global.
-- Asset classes: Equities, Government bonds/rates, Credit, FX, Commodities,
-  Crypto, Cash.
+Regions (9): `us`, `euro_area`, `uk`, `europe_ex_uk`, `japan`, `china`,
+`asia_ex_japan`, `emerging_markets`, `global`.
 
-Each article receives a relevance and direction per bucket; irrelevant buckets
-are omitted rather than forced to zero.
+Asset classes (7): `equities`, `govt_bonds`, `credit`, `fx`, `commodities`,
+`crypto`, `cash`.
 
-### Strategy profiles
+Equity styles (7): `equity_value`, `equity_growth`, `equity_momentum`,
+`equity_quality`, `equity_low_vol`, `equity_small_cap`, `equity_dividend`.
 
-The published bundle currently contains seven sleeves:
+Sectors (11): `sector_tech`, `sector_financials`, `sector_healthcare`,
+`sector_consumer_discretionary`, `sector_consumer_staples`, `sector_energy`,
+`sector_industrials`, `sector_materials`, `sector_utilities`,
+`sector_real_estate`, `sector_communication`.
 
-- Dashboard position demo
-- Europe momentum reversal
-- EuropeOrderFlowStres
-- EuropeShortHoldPaper
-- Paper order smoke test
-- S&P 500 momentum reversal
-- S&P 500 short momentum reversal
+Each item receives relevance, direction and confidence per bucket. Only buckets
+with relevance >= 20 are returned; irrelevant buckets are omitted rather than
+forced to zero. Do not sum overlapping buckets into one "global" score.
 
-Proposed treatment:
+### Strategy profiles (7)
 
-- Score only accepted live/paper strategies.
-- Exclude `Dashboard position demo` and `Paper order smoke test` from member
-  sentiment, or label them as test sleeves.
-- Normalise the two truncated names before display.
-- Add a `terminal_strategy_profiles` row per accepted strategy with display
-  name, direction (`long`, `short`, `market_neutral`), universe, regions,
-  sectors, current attributed symbols and a short mandate description.
+| Key | Display name | Direction | Universe | Pilot status |
+| --- | --- | --- | --- | --- |
+| `sp500_momentum` | S&P 500 momentum reversal | long | US large-cap | Scored |
+| `sp500_short_momentum` | S&P 500 short momentum reversal | short | US large-cap | Scored |
+| `europe_momentum` | Europe momentum reversal | long | European equities | Scored |
+| `europe_order_flow_stress` | Europe order-flow stress | unknown | European equities | Profile incomplete; no strategy module found |
+| `europe_short_hold` | Europe short hold paper | short | European equities | Provisional; no dedicated module found |
+| `paper_order_smoke_test` | Paper order smoke test | test | Single test instrument | Not scored |
+| `dashboard_position_demo` | Dashboard position demo | demo | Demo position | Not scored |
+
+The pilot scores all seven so the pipeline and UI can be exercised. The three
+not-scored rows (`europe_order_flow_stress`, `paper_order_smoke_test`,
+`dashboard_position_demo`) return `relevance=0`, `direction=0`, `confidence=1`
+and the exact rationale "Not scored: test/demo sleeve or incomplete strategy
+profile." That lets the UI label them instead of inventing a directional view.
+`europe_short_hold` is scoreable in the pilot but provisional; do not show its
+scores to members until its mandate is confirmed. Normalise the two truncated
+IBKR names (`EuropeOrderFlowStres`, `EuropeShortHoldPaper`) before display.
 
 Without a direction and mandate, "bullish for the strategy" is ambiguous: a
 bearish market story can be supportive for a short strategy. The profile is
@@ -141,34 +170,42 @@ All tables are member-only reads unless stated; only the service role writes.
 | Column | Type | Notes |
 | --- | --- | --- |
 | `news_id` | text | FK to `terminal_news_items`, cascade delete. |
+| `run_id` | uuid | FK to `terminal_news_classification_runs`. |
 | `scope_kind` | text | `market` or `strategy`. |
 | `scope_key` | text | Taxonomy key, e.g. `us`, `euro_area`, `sp500_momentum`. |
 | `direction` | numeric | `-100` strong bearish to `+100` strong bullish. |
-| `confidence` | numeric | `0-100`. |
+| `confidence` | numeric | `1-100`; not-scored rows use `1`. |
 | `relevance` | numeric | `0-100`; how much the item is about this scope. |
-| `horizon` | text | `intraday`, `days`, `weeks`, `months`. |
-| `rationale` | text | Max 1,000 chars; no invented facts. |
-| `evidence` | jsonb | Short quoted spans from the supplied text, max 3. |
+| `horizon` | text | `weeks` for this release; keep the column for later horizons. |
+| `rationale` | text | Max 600 chars; no invented facts. |
+| `evidence` | jsonb | Optional; short quoted spans, max 3. Deferred until the prompt is stable. |
 | `model` | text | e.g. `deepseek-v4.1-flash`. |
 | `model_checkpoint` | text | e.g. `1017`. |
 | `prompt_version` | text | Versioned prompt/schema pair. |
 | `classified_at` | timestamptz | Default now. |
 
-Primary key: `(news_id, scope_kind, scope_key, model, prompt_version)`.
-Index on `(scope_kind, scope_key, classified_at desc)`.
+Primary key: `(news_id, scope_kind, scope_key, run_id)`.
+Index on `(scope_kind, scope_key, classified_at desc)`. The run row carries
+`model`, `model_checkpoint`, `prompt_version`, `schema_version`,
+`reasoning_effort` and `max_tokens`, so a `high` and a `max` run do not
+overwrite each other.
 
 ### `terminal_news_classification_runs`
 
 Private operational table (service role only, no member select): run id,
-model, prompt version, started/finished time, item count, failure count, input
-tokens, output tokens, estimated cost, status and a redacted error code. Used
-for cost caps and source health, never for public claims.
+model, prompt version, schema version, reasoning effort, max tokens,
+started/finished time, item count, failure count, input tokens, output tokens,
+estimated cost, status and a redacted error code. Used for cost caps and source
+health, never for public claims.
 
 ### `terminal_strategy_profiles`
 
 Strategy key, display name, direction, universe, regions, sectors, symbols,
-mandate description, active flag and updated time. Member-readable so the UI
-can label scores; no balances.
+mandate description, `profile_status` (`confirmed`, `provisional`, `test`,
+`demo`), `scoreable` boolean, active flag and updated time. Member-readable so
+the UI can label scores; no balances. Seed the seven profiles from the taxonomy
+table above; only `confirmed` and `scoreable` rows are shown as investment
+views.
 
 ### `terminal_news_items` additions
 
@@ -216,52 +253,85 @@ profiles.
 
 ### Response schema
 
+The pilot uses a flat `scores` array. A nested `markets`/`strategies` schema with
+long enum lists was unreliable: one run returned `confidence: 0` for every
+scope, and a stricter schema returned truncated JSON. The flat shape validated
+6/6 pilot items after the output cap was raised.
+
 ```json
 {
   "summary": "One or two sentences.",
-  "event_type": "macro|earnings|policy|geopolitics|company|market|other",
-  "novelty": 0,
-  "materiality": 0,
-  "markets": [
+  "scores": [
     {
-      "key": "us",
-      "relevance": 0,
-      "direction": 0,
-      "confidence": 0,
-      "horizon": "weeks",
-      "rationale": "Why, using only the supplied text.",
-      "evidence": ["short quote"]
-    }
-  ],
-  "strategies": [
-    {
-      "key": "sp500_momentum",
-      "relevance": 0,
-      "direction": 0,
-      "confidence": 0,
-      "horizon": "weeks",
-      "rationale": "Why this supports or undermines this strategy.",
-      "evidence": ["short quote"]
+      "scope": "us",
+      "kind": "market",
+      "relevance": 90,
+      "direction": -60,
+      "confidence": 70,
+      "rationale": "Why, using only the supplied text."
     }
   ]
 }
 ```
 
+`kind` is `market` or `strategy`; the worker maps `scope` to the versioned
+taxonomy and rejects unknown keys. The model returns only scopes with relevance
+>= 20. `horizon` is fixed to `weeks` for this release, so it is stored once per
+run rather than repeated on every score.
+
 Validation rules:
 
-- Reject unknown market/strategy keys.
-- Reject out-of-range numbers, missing rationale, or more than three evidence
-  quotes.
+- Reject unknown market/strategy keys and a `kind` that does not match the key.
+- Reject out-of-range numbers, missing rationale, duplicate scopes, or a
+  rationale longer than 600 characters.
+- Reject `confidence=0`; require `1-100` for every included scope.
+- Enforce the exact not-scored row for `europe_order_flow_stress`,
+  `paper_order_smoke_test` and `dashboard_position_demo`. Do not use the
+  not-scored rationale for `europe_short_hold`; omit it when relevance < 20.
 - Retry once with the validation error; then mark the item failed and keep it
   unclassified. Never write a guessed score.
-- `temperature=0`, `reasoning_effort="max"`, JSON schema structured output.
-- Store `model`, `model_checkpoint`, `prompt_version` and `schema_version`.
+- `temperature=0`, `response_format={"type":"json_object"}`.
+- `max_tokens` must be at least `32000`. At `8000`, `max` reasoning consumed the
+  whole cap and returned empty or truncated content on long transcripts and one
+  short headline.
+- `reasoning_effort`: `high` for routine headlines, `max` for podcasts and
+  ambiguous or market-moving items. In the pilot, `max` used about 11k
+  reasoning tokens on a one-line ASML headline versus about 4k at `high`, with
+  materially similar scores. Make the setting configurable per run.
+- Store `model`, `model_checkpoint`, `prompt_version`, `schema_version`,
+  `reasoning_effort` and `max_tokens`.
+
+### Pilot findings (25 November 2026)
+
+- Six items were classified: FT, Yahoo Finance/ASML, Reuters via Google News,
+  The Macro Trading Floor, Morgan Stanley Thoughts on the Market and Goldman
+  Sachs The Markets.
+- The first run passed three items and failed three. All three failures were
+  caused by the 8,000-token output cap, not by source access or invalid keys.
+  With `max_tokens=32000`, all three passed on retry.
+- The model correctly inverted a short strategy: bearish US equity news produced
+  a negative score for `sp500_momentum` and a positive score for
+  `sp500_short_momentum`.
+- The model correctly flagged test/demo sleeves instead of inventing a view.
+  `europe_short_hold` was also flagged in one podcast; the prompt now explicitly
+  makes it scoreable and tells the model to omit it below the relevance
+  threshold.
+- The Reuters item omitted all strategy rows because none reached the relevance
+  threshold. The production prompt should always emit all seven strategy keys,
+  using the not-scored row for the three flagged sleeves.
+- The pilot is a formatting and reasoning smoke test, not an accuracy benchmark.
+  A human-labelled set of 50-100 items is still required.
+
+Full score tables, token usage and latency: [NEWS_SENTIMENT_PILOT.md](./NEWS_SENTIMENT_PILOT.md).
 
 ### Idempotency
 
-- Unique key on `(news_id, scope_kind, scope_key, model, prompt_version)`.
-- Rerunning an item replaces its current-version rows, not duplicates them.
-- A new prompt version does not overwrite old rows; it adds a new version.
+- Unique key on `(news_id, scope_kind, scope_key, run_id)`.
+- A retry inside one run replaces that run's rows, not duplicates them.
+- A new prompt, model or reasoning effort creates a new run and adds rows; it
+  does not overwrite the old run.
+- The member view selects the latest successful run per item. Old runs remain
+  available for audit and calibration.
 - Classify each deduplicated `group_id` once where possible, then copy the
   result to member items in the cluster with a `cluster_source` flag.
 
@@ -289,73 +359,110 @@ Validation rules:
 
 ### Podcasts
 
-Start with a curated list, not open-ended crawling:
+First batch, selected by the user on 25 November 2026:
 
-- FT Unhedged, Reuters Econ World, Bloomberg Surveillance, Odd Lots, The Macro
-  Compass, or similar.
-- Prefer Podcasting 2.0 `<podcast:transcript>` tags or a licensed transcript API
-  (Spoken, Podchaser, Exa, etc.).
-- If no transcript exists, transcribe with Whisper/Deepgram only when the show's
-  terms permit it.
+| Show | Episode | Date | Transcript route | Notes |
+| --- | --- | --- | --- | --- |
+| The Macro Trading Floor | Macro Doomerism - Right or Wrong? | 20 Nov 2026 | Public transcript at PodcastTranscript.ai; RSS audio at `feeds.megaphone.fm/ALFINVESTMENTSTRATEGYBV2974145286` | 5,812 words; the RSS has no `<podcast:transcript>` tag. |
+| Morgan Stanley — Thoughts on the Market | 2027 Equities Outlook: Why the Correction Isn't the End of the Bull Market | 18 Nov 2026 | Episode page publishes a transcript | 6,302 words; fetch with a browser user agent. |
+| Goldman Sachs — The Markets | Why Investors Are Reducing AI Exposure | 22 Oct 2026 | Public transcript PDF | 2,432 words; published 23 Oct 2026. |
+
+Rules:
+
+- Keep a curated list; do not crawl open-ended podcast directories.
+- Prefer a publisher transcript, then a Podcasting 2.0
+  `<podcast:transcript>` tag, then a licensed transcript API. Use
+  Whisper/Deepgram only when the show's terms permit it.
 - Store episode metadata, an AI summary and scores; do not store or republish
-  the full transcript.
-- Chunk long episodes (e.g. 8k tokens), summarize each chunk, then aggregate.
-- Run hourly/daily, not every five minutes.
+  the full transcript. Link to the publisher or episode page.
+- The current model handled 5,800-6,300 words in one pass. Chunk episodes above
+  roughly 15,000 words, summarize each chunk, then aggregate.
+- Run podcasts daily or hourly, not every five minutes.
+- Confirm display/linking terms before any member-facing podcast card.
 
 ## Model route and cost
 
-### Recommended route
+### Route confirmed
 
-Use the OpenAI-compatible endpoint
-`https://opencode.ai/inference/go/openai/v1/chat/completions` with
-`model: "deepseek-v4.1-flash"`, `reasoning_effort: "max"` and structured JSON.
-This is the requested model/checkpoint and supports a 1M-token context.
+The stored OpenCode Go credential works against:
 
-### Pilot smoke test
+- `POST https://opencode.ai/inference/go/openai/v1/chat/completions`
+- `GET https://opencode.ai/inference/go/v1/usage`
+- `GET https://opencode.ai/inference/go/v1/models`
 
-On 25 November 2026, `opencode run --archived -m
-opencode-go/deepseek-v4.1-flash` returned schema-shaped JSON for two synthetic
-examples: a US macro headline (market direction `-25`, confidence `62`) and a
-US rally headline against a mock short strategy (market `+75`, strategy `-75`).
-The second result confirms the model can invert direction correctly when the
-strategy profile says `short`. This is a formatting and reasoning smoke test,
-not an accuracy benchmark; the 50-100 item human-labelled pilot is still required.
+The catalog describes `deepseek-v4.1-flash` as **DeepSeek V4.1 Flash 1017**
+(`canonical_id` `deepseek/deepseek-v4.1-flash-1017`), with a 1M-token context,
+384k output limit, structured output, reasoning effort `low`/`high`/`max`,
+zero-data-retention and no training. The Go plan lists $100 of monthly usage
+for this model.
 
-**Terms risk:** OpenCode Go is documented for OpenCode and other coding-agent
-traffic; a high-volume scheduled news classifier may not fit that intended use.
-For production, either:
+Authentication is `Authorization: Bearer oc_sk_...` plus
+`x-opencode-session` and a client user agent. The current desktop credential is
+a stored API key and was used for the pilot. For production, create a dedicated
+service-account key in Console → Settings → Service accounts, restrict it to
+**Models: Request**, and store it in the local `.env` or Windows Credential
+Manager. Do not make a scheduled worker read the desktop credential.
 
-1. confirm with OpenCode that this workload is acceptable under the Go plan, or
+### Terms caveat
+
+The Go documentation says it is designed for OpenCode and other coding agents
+that produce similar requests, and that traffic is monitored for abuse. A
+scheduled news classifier is outside that description. The API works, but this
+is a terms risk, not a technical blocker. For production, either:
+
+1. confirm with OpenCode support that a low-volume news classifier is acceptable
+   under the Go plan, or
 2. use a direct DeepSeek API key with the same 1017 model and pay-as-you-go
    pricing.
 
-A pilot can run through Go at low volume; production should not depend on an
-unconfirmed interpretation of the plan terms.
+Use Go for the pilot; do not assume production approval until it is confirmed.
+
+### Pilot smoke test
+
+On 25 November 2026, the API classified six real items: FT, Yahoo Finance/ASML,
+Reuters via Google News, The Macro Trading Floor, Morgan Stanley Thoughts on the
+Market and Goldman Sachs The Markets. All six passed after `max_tokens` was
+raised from 8,000 to 32,000. The model correctly inverted a short strategy:
+bearish US equity news produced a negative score for `sp500_momentum` and a
+positive score for `sp500_short_momentum`.
+
+The pilot also found that a nested `markets`/`strategies` schema with long enum
+lists was unreliable. The flat `scores` array is the supported shape. This is a
+formatting and reasoning smoke test, not an accuracy benchmark; the 50-100 item
+human-labelled set is still required.
 
 ### Cost estimate
 
-At roughly 300 articles/day, 1,200 input and 600 output tokens each:
+Measured on the pilot (allowance cost, not list price):
 
-- input: 360k tokens/day x $0.15/M = $0.054/day
-- output: 180k tokens/day x $0.60/M = $0.108/day
-- total: about **$0.16/day**, or **$5/month** off-peak; about **$10/month** at
-  the 2x peak multiplier.
-- Add podcasts, retries and prompt overhead: budget **$15-25/month**.
-- A 2,000-article/day workload is roughly $30-35/month before podcasts.
+| Setting | Short article | 300 articles/day | 30 days |
+| --- | --- | --- | --- |
+| `reasoning_effort=high` | about $0.0018 | about $0.54/day | about **$16/month** |
+| `reasoning_effort=max` | about $0.0043 | about $1.29/day | about **$39/month** |
+
+Add roughly $5-10/month for podcasts, retries and prompt overhead. A
+`high`-for-headlines / `max`-for-podcasts policy lands near **$20-25/month**.
+The 2x peak multiplier applies on weekdays 01:00-04:00 and 06:00-10:00 UTC, so
+schedule bulk classification off-peak where possible.
 
 Set `NOVA_NEWS_AI_DAILY_USD` and stop classifying when the cap is reached.
-Record token usage from the API response; never estimate silently.
+Record token usage from the API response; never estimate silently. The pilot
+used about $0.02 of allowance for six items; the current Go workspace was at
+18% monthly, 1% weekly and 0% rolling usage at test time.
 
 ## UI plan
 
 ### Home
 
 - Add a compact **MARKET SENTIMENT** strip or heatmap above/below the world map:
-  region and asset-class direction, confidence, article count and last update.
+  region, asset-class, equity-style and sector direction, confidence, article
+  count and last update.
 - Keep the existing ranked/latest list, but add a small sentiment chip
   (bullish/bearish/neutral) and a "why" expansion.
-- Clicking a headline opens a member article detail view rather than only
-  expanding the drawer.
+- Keep the original article headline exactly as published. The AI summary and
+  scores are separate fields; do not rewrite the headline.
+- No dedicated article route in this release (user decision). The existing
+  inline expansion is the article view.
 
 ### Strategies
 
@@ -366,34 +473,40 @@ Record token usage from the API response; never estimate silently.
   - an explicit "AI analysis, not investment advice" label.
 - Add a strategy x market heatmap so members can see where the book is
   exposed to the same narrative.
+- Show `europe_order_flow_stress`, `paper_order_smoke_test` and
+  `dashboard_position_demo` as "profile incomplete" or "test sleeve", not as
+  investment views, until their mandates are confirmed.
 
-### Article detail
+### Article interaction
 
-- Route: `/terminal/news` list and `/terminal/news/[id]` detail (member-only).
-- Detail shows headline, publisher, source time, short summary, AI rationale,
-  evidence quotes, market/strategy scores, and **Open source article**.
+- Reuse the Home drawer: publisher, source time, short summary, market and
+  strategy scores, rationale, and **Open source article**.
 - Paywalled articles show "Source may require a subscription"; do not proxy or
   copy the article.
-- Signed-out access redirects to `/terminal/sign-in`; add a safe allowlisted
-  `terminal-news` destination. For a specific article, remember the return path
-  in session storage rather than accepting an arbitrary `next` URL.
+- Signed-out access redirects to `/terminal/sign-in`; do not accept an arbitrary
+  `next` URL. Remember only a safe internal return path in session storage.
 - No public/anonymous sentiment display in the first release.
 
 ## Operations
 
 - New module: `dashboard/news_sentiment.py` (or `news_classifier.py`).
-- CLI: `--once`, `--limit`, `--dry-run`, `--model`, `--since`, `--max-usd`.
+- CLI: `--once`, `--limit`, `--dry-run`, `--model`, `--since`, `--max-usd`,
+  `--effort high|max`, `--max-tokens`, `--source`.
+- Defaults: `max_tokens=32000`; `effort=high` for articles and `max` for
+  podcasts or flagged items; `temperature=0`; `response_format=json_object`.
 - Queue query: items with no current `(model, prompt_version)` result, oldest
-  first, capped per run.
-- Windows task: `NQC-News-Sentiment`, every 10 minutes, limited privilege,
-  interactive login, file lock, five-minute recovery trigger, logs under
-  ignored `data/`.
+  first, capped per run. Always request all seven strategy keys; the three
+  flagged sleeves return the not-scored row.
+- Windows tasks: `NQC-News-Sentiment` every 10 minutes for articles;
+  `NQC-News-Podcast` daily for episodes. Limited privilege, interactive login,
+  file lock, five-minute recovery trigger, logs under ignored `data/`.
 - Retries: exponential backoff on 429/5xx; one schema-validation retry; mark
   permanent failures after N attempts.
 - Health: write classifier status separately from source health; do not mark a
-  source down because the model failed.
-- Security: API key only in local `.env` or Windows credentials; never commit,
-  log or return it. Service-role writes; member-only reads.
+  source down because the model failed. Track schema failures and cap hits.
+- Security: `OPENCODE_API_KEY` only in local `.env` or Windows Credential
+  Manager; never commit, log or return it. Use a dedicated service-account key,
+  not the desktop credential. Service-role writes; member-only reads.
 - Retention: news items 30 days; sentiment rows 90 days; aggregates can be
   recomputed. Delete cascade with the item.
 
@@ -416,31 +529,38 @@ Record token usage from the API response; never estimate silently.
 
 ## Rollout phases
 
-### Phase 0 - pilot (no UI)
+### Phase 0 - pilot (no UI) — completed 25 November 2026
 
-- Add FT, Yahoo per-symbol and Reuters-discovery sources in dry-run mode.
-- Add the sentiment schema and a mock-model test harness.
-- Classify 20-50 real items with the pilot prompt; human-review the output.
-- Measure cost, latency and schema validity.
+- FT, Yahoo per-symbol and Reuters-discovery sources fetched successfully.
+- The flat sentiment schema, validation and real API route were exercised.
+- Six real items were classified: three articles and the three selected
+  podcast episodes.
+- Initial 8,000-token cap caused three failures; 32,000 fixed all three.
+- Cost, latency and schema validity were measured.
+- Still required: a human-labelled set of 50-100 items and a second reviewer.
 
 ### Phase 1 - member news + market scores
 
-- Production classifier for articles, market buckets only.
-- Add article detail route and Home sentiment strip.
+- Production classifier for articles across regions, asset classes, equity
+  styles and sectors.
+- Add the Home sentiment strip and the inline "why" expansion. No dedicated
+  article route.
 - RLS, retention, cost cap, source health and tests.
 - Member-only release; no public data.
 
 ### Phase 2 - strategies
 
-- Seed accepted strategy profiles and normalize display names.
+- Seed the seven profiles and normalize display names.
+- Confirm `europe_order_flow_stress` and `europe_short_hold` before showing
+  their scores.
 - Add strategy scores, strategy cards and the market/strategy heatmap.
 - Add admin review/override workflow.
 
 ### Phase 3 - podcasts
 
-- Curate shows and transcript sources.
-- Add episode ingestion, chunked classification and podcast badges.
-- Keep full transcripts out of the database.
+- Ingest the three selected episodes and their transcript sources.
+- Add episode metadata, summaries, scores and podcast badges.
+- Keep full transcripts out of the database; link to the publisher.
 
 ### Phase 4 - calibration
 
@@ -458,16 +578,34 @@ Record token usage from the API response; never estimate silently.
 - No full article text or full podcast transcript is stored or republished.
 - No verified return, trading decision or order path consumes sentiment scores.
 
+## Resolved decisions (25 November 2026)
+
+1. Test all seven current sleeves. Four are scoreable now; three are flagged as
+   test/demo or profile incomplete.
+2. Market scores cover regions and asset classes, with equities split into
+   styles and sectors.
+3. Horizon is `weeks`.
+4. No dedicated article pages; reuse the inline Home drawer and source link.
+5. First podcast batch: The Macro Trading Floor, Morgan Stanley Thoughts on the
+   Market and Goldman Sachs The Markets (the three episodes supplied).
+6. Use OpenCode Go for the pilot; the API key route is confirmed.
+
 ## Open decisions
 
-1. Which strategies are official for scoring, and which stay test/demo?
-2. Should market scores cover regions, asset classes, or both? Default: both.
-3. What horizon should the headline score represent: intraday, days, weeks or
-   months? Default: weeks, with intraday optional.
-4. Article access: inline drawer only, or dedicated `/terminal/news/[id]`
-   pages? Recommendation: dedicated member pages with source links.
-5. Podcast shows and transcript budget: which shows, and is a paid transcript
-   API acceptable?
-6. Model route: OpenCode Go (confirm workload terms) or direct DeepSeek API.
-7. Who reviews/overrides AI scores, and how often?
-8. Should any sentiment aggregate ever be public, or stay member-only?
+1. Confirm the direction, universe and mandate of `europe_order_flow_stress` and
+   `europe_short_hold`. Should either be shown to members, or kept as test
+   sleeves?
+2. Production model route: confirm with OpenCode that a low-volume news
+   classifier is acceptable under Go, or use a direct DeepSeek API key.
+3. Who reviews or overrides AI scores, and how often? Start with a weekly
+   sample review.
+4. Should any sentiment aggregate ever be public, or stay member-only? Default:
+   member-only.
+5. Podcast display: is linking to Spotify/publisher pages and showing an AI
+   summary and scores acceptable for each show, or is explicit permission
+   needed?
+6. Approve the source list. Current proposal: FT, Yahoo per-symbol, Reuters via
+   Google News, ECB/Fed. Add or remove before Phase 1.
+7. Default reasoning effort: `high` for routine headlines and `max` for podcasts
+   and ambiguous items, or `max` everywhere?
+8. Set the daily USD cap and retention values before the first production run.
