@@ -443,7 +443,9 @@ Measured on the pilot (allowance cost, not list price):
 Add roughly $5-10/month for podcasts, retries and prompt overhead. A
 `high`-for-headlines / `max`-for-podcasts policy lands near **$20-25/month**.
 The 2x peak multiplier applies on weekdays 01:00-04:00 and 06:00-10:00 UTC, so
-schedule bulk classification off-peak where possible.
+schedule bulk classification off-peak where possible. At 2,000 articles/day,
+`max` would exceed the Go monthly allowance; use `high`, batch the work, or move
+that volume to a direct API key.
 
 Set `NOVA_NEWS_AI_DAILY_USD` and stop classifying when the cap is reached.
 Record token usage from the API response; never estimate silently. The pilot
