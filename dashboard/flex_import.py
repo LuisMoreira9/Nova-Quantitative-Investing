@@ -348,7 +348,8 @@ def read_flex(path: Path) -> FlexImport:
             if row.get("assetCategory") != "STK" or _number(row, "multiplier") != 1:
                 result.issues.add("unsupported_trade_instrument")
             execution = {
-                "executed_at": executed, "trade_date": trade_day, "report_date": report_day,
+                "executed_at": executed, "executed_at_raw": _required(row, "dateTime"),
+                "trade_date": trade_day, "report_date": report_day,
                 "symbol": _required(row, "symbol"), "conid": _required(row, "conid"),
                 "currency": _currency(row), "side": side.lower(), "quantity": abs(quantity), "price": price,
                 "multiplier": _number(row, "multiplier"),
@@ -734,8 +735,13 @@ def reconcile_balances(imported: FlexImport) -> dict:
     }
 
 
-def reconcile_ledger(imported: FlexImport, path: Path) -> dict:
-    """Compare original local fills by execution ID; never overwrite either source."""
+def read_observed_ledger(path: Path) -> tuple[dict, int]:
+    """Read the legacy observed fill CSV without modifying it.
+
+    Validation matches the reconciliation path: explicit timestamps, unique
+    non-empty headers, positive quantities/prices and execution-ID conflicts stop
+    the read. The returned records stay private and in memory.
+    """
     seen: dict = {}
     duplicate_rows = 0
     with path.open(encoding="utf-8-sig", newline="") as stream:
@@ -752,12 +758,19 @@ def reconcile_ledger(imported: FlexImport, path: Path) -> dict:
             except ValueError:
                 raise FlexError("invalid_ledger_timestamp") from None
             side = {"bot": "buy", "buy": "buy", "sld": "sell", "sell": "sell"}.get(_required(row, "side").lower())
-            value = {"executed_at": timestamp, "symbol": _required(row, "symbol"), "currency": _currency(row),
+            value = {"executed_at": timestamp, "timestamp_raw": _required(row, "timestamp"),
+                     "symbol": _required(row, "symbol"), "currency": _currency(row),
                      "side": side, "quantity": _number(row, "quantity"), "price": _number(row, "price"),
-                     "order_ref": _required(row, "order_ref")}
+                     "order_ref": _required(row, "order_ref"), "strategy": row.get("strategy", "").strip()}
             if side is None or value["quantity"] <= 0 or value["price"] <= 0:
                 raise FlexError("invalid_ledger_fill")
             duplicate_rows += _upsert(seen, _required(row, "execution_id"), value, "ledger_execution")
+    return seen, duplicate_rows
+
+
+def reconcile_ledger(imported: FlexImport, path: Path) -> dict:
+    """Compare original local fills by execution ID; never overwrite either source."""
+    seen, duplicate_rows = read_observed_ledger(path)
     matched = set(seen) & imported.trades.keys()
     mismatch_counts = {k: 0 for k in ("symbol", "currency", "side", "quantity", "price", "order_ref", "executed_at")}
     timestamp_offsets: dict[str, int] = {}

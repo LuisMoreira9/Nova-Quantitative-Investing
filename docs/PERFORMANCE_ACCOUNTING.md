@@ -121,3 +121,36 @@ Verification: 32 offline tests passed (12 importer/parsing, six balance/position
 ### Next bounded slice
 
 Stage the missing broker fills and timestamp provenance in a separate private accounting ledger, then accept an explicit opening account and strategy-capital baseline. Preserve the legacy ledger until the staged ledger is verified; no automatic return calculation, publisher change or public UI exposure is included here.
+
+## Execution staging checkpoint — 25 November 2026
+
+`dashboard.accounting_ledger` builds an atomic, private SQLite staging ledger from the Activity Flex XML and the legacy observed CSV. It keeps the broker statement fills as the primary record, preserves the legacy timestamp and all matched legacy fields, and labels every discrepancy instead of correcting it silently. The XML and CSV remain read-only.
+
+Implemented:
+
+- One row per execution ID, with `record_origin` of `statement_and_ledger`, `statement` or `ledger`. All 6,869 statement-only fills are staged, not discarded because the legacy ledger missed them.
+- Broker `dateTime` text and normalized UTC are stored alongside the legacy timestamp text, normalized UTC and strategy. `time_delta_seconds` is legacy minus statement; offset counts are reported, not explained or applied.
+- Symbol, currency, side, quantity, price and order-reference mismatches are preserved in both forms and listed in `field_mismatches`. `review_reason` distinguishes `matched`, `timestamp_offset`, `field_mismatch`, `statement_only`, `ledger_only_in_period` and `ledger_only_outside_period`.
+- Metadata records the source and legacy SHA-256 digests, statement period, base currency, counts, offset/mismatch counts and explicit `calendar_coverage_verified=false`, `opening_baseline_accepted=false`, `strategy_capital_accepted=false`.
+- The database is written to a temporary file and atomically replaced, so repeated runs are deterministic and cannot leave a partial ledger. Output must be outside Git; `/data/accounting/` and `/data/*.sqlite` are ignored as a safety net.
+- CLI stdout contains only status, counts, dates, digests and reason codes. It never prints symbols, conids, amounts, account identity or execution IDs.
+
+Real export result with the legacy ledger:
+
+- **8,343** statement executions staged: **1,474** matched, **6,869** statement-only, **0** ledger-only.
+- **573** matched fills have exact timestamps; **901** differ: 885 at +3,600 seconds, seven at +3,601, one at +3,610 and eight at +1. The large group is consistent with legacy Lisbon wall-clock time stored as UTC, but the ledger records the offsets rather than asserting the cause. The small offsets remain unresolved.
+- Zero symbol, currency, side, quantity, price or order-reference mismatches. Zero legacy duplicate rows and **106** equivalent statement duplicate rows were collapsed by the existing parser.
+
+```powershell
+cd C:\Users\guiro\Documents\Nova-Quantitative-Investing-terminal
+& ..\Nova-Quantitative-Investing\.venv-windows\Scripts\python.exe -m dashboard.accounting_ledger C:\Users\guiro\Downloads\NQC_Accounting_XML.xml --ledger ..\Nova-Quantitative-Investing\data\nova_strategy_execution_ledger.csv --output C:\Users\guiro\Documents\Nova-Private-Accounting\nqc_execution_staging.sqlite
+& ..\Nova-Quantitative-Investing\.venv-windows\Scripts\python.exe -m unittest tests.test_flex_import tests.test_balance_reconciliation tests.test_accounting_ledger tests.test_performance_readiness tests.test_terminal_public_summary
+```
+
+Verification: **38 offline tests passed** (12 importer/parsing, six balance/position/corporate-action, six staging-ledger, seven readiness and seven public-summary). Synthetic fixtures cover timestamp offsets, statement-only and ledger-only fills, field mismatches, deterministic rebuilds, read-only inputs, directory-output rejection and CLI redaction.
+
+This checkpoint makes the missing fills reviewable; it does not accept the opening account, strategy capital or timestamp corrections. `verified_return_pct` stays null, and no publisher, reporter or website change is included.
+
+### Next bounded slice
+
+Accept an explicit account opening baseline and strategy-capital/transfer rules against the staged ledger. Only after those decisions are recorded should a return calculation consume the ledger; no automatic timestamp correction or public exposure is implied.

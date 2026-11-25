@@ -12,6 +12,11 @@
 /data/portfolio_sector_audit.json
 /data/sector_audit.txt
 
+# Private accounting staging ledgers contain fills and timestamp provenance.
+/data/accounting/
+/data/*.sqlite
+/data/*.sqlite-*
+
 # Machine-local ownership record for the opt-in held-short paper test.
 /data/europe_short_hold_paper_state.json
 
