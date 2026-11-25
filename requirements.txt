@@ -15,3 +15,8 @@ plotly>=5.24.0
 # Local read-only bridge used by the Svelte website during portfolio-page development.
 fastapi>=0.115.0
 uvicorn>=0.34.0
+
+# News sentiment collector/classifier (FT/Yahoo RSS, transcript extraction).
+requests>=2.32.0
+beautifulsoup4>=4.13.0
+pypdf>=6.0.0
